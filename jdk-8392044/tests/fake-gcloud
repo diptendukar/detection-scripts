@@ -4,6 +4,8 @@
 #
 #   <project>/<word>.<word>...[_<key>].json   response on stdout, exit 0
 #   <project>/<word>.<word>...[_<key>].err    message on stderr, exit 1
+#   <project>/<word>.<word>...[_<key>].warn   printed on stderr next to the
+#                                             .json, exit 0 (partial failure)
 #   <word>.<word>....json                     project-independent response
 #
 # <word>s are the positional arguments (e.g. "run.services.list",
@@ -38,7 +40,11 @@ if [ "$words" = "config.get-value.project" ]; then
     exit 0
 fi
 for f in "$dir/$project/$words$key" "$dir/$words$key"; do
-    if [ -f "$f.json" ]; then cat "$f.json"; exit 0; fi
+    if [ -f "$f.json" ]; then
+        [ -f "$f.warn" ] && cat "$f.warn" >&2
+        cat "$f.json"
+        exit 0
+    fi
     if [ -f "$f.err" ]; then cat "$f.err" >&2; exit 1; fi
 done
 echo "ERROR: (gcloud.$words) fake-gcloud: no fixture $project/$words$key" >&2

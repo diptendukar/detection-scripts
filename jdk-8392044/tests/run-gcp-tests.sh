@@ -167,7 +167,10 @@ echo "ERROR: (gcloud.run.services.list) PERMISSION_DENIED: Permission 'run.servi
 echo "ERROR: (gcloud.run.jobs.list) PERMISSION_DENIED: Permission 'run.jobs.list' denied on resource" > "$B/run.jobs.list.err"
 echo "ERROR: (gcloud.functions.list) Cloud Functions API has not been used in project demo-b before or it is disabled." > "$B/functions.list.err"
 echo "ERROR: (gcloud.app.versions.list) Project [demo-b] does not contain an App Engine application." > "$B/app.versions.list.err"
+# gcloud compute exits 0 with [] when the permission is missing.
 echo '[]' > "$B/compute.instances.list.json"
+printf "WARNING: Some requests did not succeed.\n - Required 'compute.instances.list' permission for 'projects/demo-b'\n" \
+    > "$B/compute.instances.list.warn"
 
 # ------------------------------------------------------------------ tests ---
 
@@ -244,7 +247,12 @@ echo "== denied, disabled and absent services"
 run bash "$S" -p demo-b
 check "demo-b -> unknown" 2 "api: run services list failed: PERMISSION_DENIED [?]" \
     "functions demo-b: not in use (API off or no app)" "appengine demo-b: not in use (API off or no app)" \
-    "note: 2 listing(s) denied."
+    "api: compute instances list failed: PERMISSION_DENIED [?]" "note: 3 listing(s) denied."
+cp "$B/compute.instances.list.warn" "$WORK/warn.keep"
+echo 'WARNING: Some requests did not succeed.' > "$B/compute.instances.list.warn"
+run bash "$S" -p demo-b -s compute
+check "partial compute listing -> unknown" 2 "api: compute instances list failed: PARTIAL_FAILURE [?]"
+cp "$WORK/warn.keep" "$B/compute.instances.list.warn"
 
 echo "== projects and options"
 run bash "$S"

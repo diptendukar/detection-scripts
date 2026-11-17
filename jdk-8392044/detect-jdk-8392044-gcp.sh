@@ -138,16 +138,24 @@ gj() {
     shift
     [ "$VERBOSE" -eq 1 ] && printf 'gcloud: %s --project %s\n' "$*" "$p" >&2
     if gcloud "$@" ${p:+--project "$p"} --format=json --quiet 2>"$TMP/err"; then
-        return 0
+        # Aggregated lists (compute) exit 0 with a partial or empty result
+        # and only warn on stderr when some requests fail. That is a failed
+        # listing, not an empty one.
+        grep -q 'Some requests did not succeed' "$TMP/err" || return 0
     fi
     if grep -qE 'SERVICE_DISABLED|has not been used in project|it is disabled|is not enabled' "$TMP/err"; then
         code=SERVICE_DISABLED
     elif grep -q 'does not contain an App Engine application' "$TMP/err"; then
         code=NO_APP
+    elif grep -qE "Required '[^']*' permission" "$TMP/err"; then
+        code=PERMISSION_DENIED
     else
-        code=$(grep -oE 'PERMISSION_DENIED|UNAUTHENTICATED|NOT_FOUND|FAILED_PRECONDITION|INVALID_ARGUMENT|RESOURCE_EXHAUSTED|UNAVAILABLE|Reauthentication required|refreshing your current auth tokens|do not currently have an active account' \
+        code=$(grep -oE "PERMISSION_DENIED|UNAUTHENTICATED|NOT_FOUND|FAILED_PRECONDITION|INVALID_ARGUMENT|RESOURCE_EXHAUSTED|UNAVAILABLE|Reauthentication required|refreshing your current auth tokens|do not currently have an active account|Some requests did not succeed" \
             "$TMP/err" | head -1)
-        case "$code" in Reauth*|refreshing*|*"active account") code=UNAUTHENTICATED ;; esac
+        case "$code" in
+            Reauth*|refreshing*|*"active account") code=UNAUTHENTICATED ;;
+            "Some requests did not succeed") code=PARTIAL_FAILURE ;;
+        esac
         [ -n "$code" ] || code=$(grep -v '^ *$' "$TMP/err" | head -1 | sed 's/^ERROR: //' | cut -c1-120)
         [ -n "$code" ] || code="failed"
     fi
