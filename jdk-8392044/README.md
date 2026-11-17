@@ -10,6 +10,7 @@ the destination buffer.
 | `Detect-Jdk8392044.ps1` | Windows; PowerShell 5.1 and 7 |
 | `detect-jdk-8392044-aws.sh` | AWS control plane (Lambda, ECS/Fargate, EC2, Beanstalk, EMR); aws CLI v2 + jq |
 | `detect-jdk-8392044-gcp.sh` | GCP control plane (Cloud Run, Cloud Run functions, App Engine, Compute Engine); gcloud + jq |
+| `ansible-`, `ssh-`, `remote-`, `k8s-`, `azure-runcommand-jdk-8392044.*` | Fleet wrappers that run the host detectors at scale; see [Fleet runs](#fleet-runs) |
 
 ## What counts as impacted
 
@@ -234,6 +235,128 @@ flags.
 
 Not covered: GKE workloads (run the host script as a DaemonSet), Dataproc
 Serverless, Dataflow, Cloud Run worker pools.
+
+## Fleet runs
+
+Wrappers that run `detect-jdk-8392044.sh` / `Detect-Jdk8392044.ps1` on many
+hosts and roll up the verdicts. Each drives only this directory's detector
+and keeps its exit-code contract. They are not covered by CI.
+
+### Ansible
+
+`ansible-jdk-8392044.yml` runs `detect-jdk-8392044.sh` on every Linux/macOS host
+in the inventory and collects each host's verdict on the control node. It is
+self-contained: it drives only this directory's own detector. No agent is
+installed; `ansible.builtin.script` copies the detector to a temp path, runs it,
+and removes it.
+
+```sh
+ansible-playbook -i inventory ansible-jdk-8392044.yml
+ansible-playbook -i inventory ansible-jdk-8392044.yml -e detect_args="-q"
+ansible-playbook -i inventory ansible-jdk-8392044.yml -e 'detect_args=-o "-XX:UseAVX=2"'
+```
+
+Each host's full detector output is saved to `./results/<host>.txt`, and a
+per-verdict host list (`impacted` / `unknown` / `not impacted` / `no result`)
+prints at the end. The run uses the detector's exit codes as the fleet signal:
+`1` (impacted) and `2` (unknown) are verdicts and do not fail the play; `3`
+(usage error) does. Run with `become` (the default here) for full coverage of
+other users' processes and containers.
+
+### SSH
+
+`ssh-jdk-8392044.sh` runs the detector across Linux/macOS hosts with no Ansible
+and nothing installed: `detect-jdk-8392044.sh` is piped to each host's bash over
+stdin and run there, so nothing is copied to or left on the target.
+
+```sh
+sh ssh-jdk-8392044.sh hosts.txt results          # one host or user@host per line
+PARALLEL=20 sh ssh-jdk-8392044.sh hosts.txt
+DETECT_ARGS="-q" sh ssh-jdk-8392044.sh hosts.txt  # save just the verdict line
+SUDO="" sh ssh-jdk-8392044.sh hosts.txt           # run as the login user (less coverage)
+```
+
+Needs key-based SSH and, for full coverage, passwordless sudo and bash on the
+targets. Each host's output goes to `results/<host>.txt`; the per-host exit code
+is the verdict (`0/1/2`, or `255`/other for an SSH failure). An impacted /
+unknown / not impacted / error roll-up prints at the end, and the script exits
+`1` if any host is impacted, else `2` if any unknown/error, else `0`.
+
+### Windows (PowerShell remoting)
+
+`remote-jdk-8392044.ps1` runs `Detect-Jdk8392044.ps1` on many Windows hosts over
+PowerShell remoting. The detector's text is sent over the session and run in
+memory; nothing is installed.
+
+```powershell
+.\remote-jdk-8392044.ps1 -ComputerList hosts.txt -OutDir results
+.\remote-jdk-8392044.ps1 -ComputerList hosts.txt -DetectArgs '-Quiet'
+```
+
+Needs WinRM enabled and a local-administrator account on the targets. Each host's
+output is saved to `results\<host>.txt`; the per-host verdict is the detector's
+last output line (`impacted` / `not impacted` / `unknown`). A roll-up prints at
+the end and the script exits `1` / `2` / `0` as above. For Intune or
+Configuration Manager, deploy `Detect-Jdk8392044.ps1` directly as a detection
+script instead (exit `1` means impacted when the last line says so).
+
+### Kubernetes
+
+Two methods, both running this repo's own detector:
+
+- `k8s-jdk-8392044.yaml` -- a DaemonSet. One pod per node with `hostPID` and
+  `privileged`, so the detector checks every JVM on the node, including those in
+  other pods (via its own `nsenter` path, as root). Nothing is copied into
+  workloads. The detector is mounted from a ConfigMap:
+
+  ```sh
+  kubectl create namespace jdk8392044
+  kubectl -n jdk8392044 create configmap detect --from-file=detect-jdk-8392044.sh
+  kubectl apply -f k8s-jdk-8392044.yaml
+  kubectl -n jdk8392044 rollout status daemonset/jdk8392044
+  kubectl -n jdk8392044 logs -l app=jdk8392044 --tail=-1 --prefix --max-log-requests=500
+  kubectl delete namespace jdk8392044
+  ```
+
+  The base image installs `util-linux` (for `nsenter`) at start; for air-gapped
+  clusters, bake bash + util-linux + the script into your own image.
+
+- `k8s-exec-jdk-8392044.sh` -- for clusters that forbid privileged pods. It
+  `kubectl exec`s the detector (piped over stdin) into every running container.
+  Needs only list/exec rights. Containers without bash (distroless, some Alpine)
+  are reported unknown; use the DaemonSet for those.
+
+  ```sh
+  sh k8s-exec-jdk-8392044.sh > results.txt              # all namespaces
+  sh k8s-exec-jdk-8392044.sh -n payments > results.txt  # one namespace
+  ```
+
+  The result for a node-wide DaemonSet pod is true for that node; the same image
+  can be affected on one node type and not another, so keep the node name (both
+  methods print it) with each result.
+
+### Azure VMs
+
+`azure-runcommand-jdk-8392044.sh` runs `detect-jdk-8392044.sh` on each Linux VM
+in a resource group through `az vm run-command invoke`. It needs no agent beyond
+the Azure VM agent and leaves nothing on the VM. Each VM's output is saved to
+`results/<vm>.txt`, and an impacted / unknown / not impacted / error roll-up
+prints at the end. The script exits `1` / `2` / `0` as above.
+
+```sh
+sh azure-runcommand-jdk-8392044.sh -g myResourceGroup results
+sh azure-runcommand-jdk-8392044.sh -g myRg --name vm1
+```
+
+Needs the Azure CLI logged in and "Virtual Machine Contributor" on the targets.
+The verdict is read from the detector's own output line. A VM that lands in
+`error` may mean Azure rejected the invocation; check its file. For Windows
+VMs, use `RunPowerShellScript` with `Detect-Jdk8392044.ps1` instead.
+
+For AWS and GCP, start with `detect-jdk-8392044-aws.sh` /
+`detect-jdk-8392044-gcp.sh` above. For EC2 or Compute Engine instances they
+leave at `[?]`, run the host script on the instance, for example with the SSH
+wrapper or through SSM Run Command.
 
 ## Testing
 
