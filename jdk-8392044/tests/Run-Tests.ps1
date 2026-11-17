@@ -45,7 +45,8 @@ function Invoke-Detect([string[]]$ScriptArgs, [hashtable]$Env = @{}) {
 
 function Assert-Result([string]$Name, $R, [int]$Code, [string]$Contains = '') {
     $ok = ($R.Code -eq $Code) -and ($R.Last -eq $VerdictFor[$Code])
-    if ($ok -and $Contains) { $ok = [bool]($R.Out | Where-Object { $_ -like "*$Contains*" }) }
+    # Literal match: -like would treat "[impacted]" as a wildcard character class.
+    if ($ok -and $Contains) { $ok = [bool]($R.Out | Where-Object { $_.Contains($Contains) }) }
     if ($ok) {
         $script:Passes++
         Write-Host "PASS  $Name"
