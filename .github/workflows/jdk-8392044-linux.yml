@@ -1,0 +1,55 @@
+name: jdk-8392044 bash detector (Linux)
+
+on:
+  push:
+    paths:
+      - "jdk-8392044/**"
+      - ".github/workflows/jdk-8392044-linux.yml"
+  pull_request:
+    paths:
+      - "jdk-8392044/**"
+      - ".github/workflows/jdk-8392044-linux.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # eclipse-temurin:21-jre, pinned by digest
+  CONTAINER_IMAGE: eclipse-temurin@sha256:ca73b4d3961703d6d7830a4361f49ef0478f8f28b39defc07bb72f4cc7f834f6
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck -S warning jdk-8392044/detect-jdk-8392044.sh jdk-8392044/tests/run-tests.sh jdk-8392044/tests/fake-java
+
+  test:
+    name: bash on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Runner CPU and JDKs
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^avx512' | tr '\n' ' '; echo
+          env | grep '^JAVA_HOME' | sort
+
+      - name: Pull container image
+        run: docker pull "$CONTAINER_IMAGE"
+
+      - name: Run tests
+        run: ./jdk-8392044/tests/run-tests.sh --container-image "$CONTAINER_IMAGE"

@@ -1,0 +1,38 @@
+#!/bin/sh
+# Fake java for exercising detect-jdk-8392044.sh decision logic on any
+# hardware. Emits the same shapes HotSpot prints for
+# -XshowSettings:properties, -Xlog:os+cpu and -XX:+PrintFlagsFinal.
+# Knobs: FAKE_VER, FAKE_VM, FAKE_ARCH, FAKE_FEATURES, FAKE_NOCPULOG.
+ver=${FAKE_VER:-17.0.9}
+vm=${FAKE_VM:-OpenJDK 64-Bit Server VM}
+arch=${FAKE_ARCH:-amd64}
+feat=${FAKE_FEATURES:-cx8, cmov, avx, avx2, avx512f, avx512dq, avx512cd, avx512bw, avx512vl, avx512_vbmi2, avx512_vbmi}
+avx=3; b64=true; comp=true; stop=4; dis=""
+case " $* " in
+    *-XshowSettings:properties*)
+        printf 'Property settings:\n    java.version = %s\n    java.vm.name = %s\n    os.arch = %s\n\nopenjdk version "%s"\n' \
+            "$ver" "$vm" "$arch" "$ver" >&2
+        exit 0 ;;
+esac
+for a in "$@"; do
+    case "$a" in
+        -XX:UseAVX=*) avx=${a#*=} ;;
+        -XX:-UseBASE64Intrinsics) b64=false ;;
+        -XX:+UseBASE64Intrinsics) b64=true ;;
+        -Xint) comp=false ;;
+        -XX:TieredStopAtLevel=*) stop=${a#*=} ;;
+        -XX:DisableIntrinsic=*) dis=${a#*=} ;;
+    esac
+done
+case "$feat" in
+    *avx512f*) [ "$avx" -gt 3 ] && avx=3 ;;
+    *) [ "$avx" -gt 2 ] && avx=2 ;;
+esac
+[ "$avx" -lt 3 ] && feat="cx8, cmov, avx, avx2"
+[ -n "${FAKE_NOCPULOG:-}" ] || echo "[0.010s][info][os,cpu] CPU: total 8 (initial active 8) family 6 model 106 stepping 6 microcode 0xd0003a5, $feat"
+printf '     intx UseAVX                                   = %s                                         {ARCH product} {default}\n' "$avx"
+printf '     bool UseBASE64Intrinsics                      = %s                                      {product} {default}\n' "$b64"
+printf '     bool UseCompiler                              = %s                                      {product} {default}\n' "$comp"
+printf '     bool TieredCompilation                        = true                                      {product} {default}\n'
+printf '     intx TieredStopAtLevel                        = %s                                         {product} {default}\n' "$stop"
+printf '    ccstrlist DisableIntrinsic                     = %s                                          {diagnostic} {default}\n' "$dis"

@@ -1,0 +1,47 @@
+name: jdk-8392044 PowerShell detector (Windows)
+
+on:
+  push:
+    paths:
+      - "jdk-8392044/**"
+      - ".github/workflows/jdk-8392044-windows.yml"
+  pull_request:
+    paths:
+      - "jdk-8392044/**"
+      - ".github/workflows/jdk-8392044-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.shell }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        shell: [powershell.exe, pwsh.exe]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Runner CPU and JDKs
+        shell: powershell
+        run: |
+          Get-CimInstance Win32_Processor | Format-List Name, Manufacturer, NumberOfLogicalProcessors
+          Get-ChildItem env: | Where-Object Name -like 'JAVA_HOME*' | Format-Table -AutoSize
+
+      - name: Build fake java.exe
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path "$PWD\fake" | Out-Null
+          Add-Type -Path "$PWD\jdk-8392044\tests\FakeJava.cs" -OutputAssembly "$PWD\fake\java.exe" -OutputType ConsoleApplication
+          & "$PWD\fake\java.exe" -XshowSettings:properties -version
+
+      - name: Run tests
+        shell: pwsh
+        run: ./jdk-8392044/tests/Run-Tests.ps1 -Shell '${{ matrix.shell }}' -FakeJava "$PWD\fake\java.exe"
