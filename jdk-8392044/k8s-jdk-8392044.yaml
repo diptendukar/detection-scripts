@@ -1,0 +1,79 @@
+# k8s-jdk-8392044.yaml -- check every JVM on every Linux node with one DaemonSet.
+#
+# One pod per node, with host process visibility (hostPID) and privileged + nsenter
+# so the detector can start each container's own java inside that container's
+# namespaces. Nothing is copied into, or changed in, any workload pod. Self-contained:
+# it runs this repo's own detect-jdk-8392044.sh, mounted from a ConfigMap.
+#
+# The detector needs bash and nsenter, which the base image here (debian:stable-slim)
+# provides after a one-time util-linux install at start (needs registry/apt access;
+# for air-gapped clusters, bake bash + util-linux + the script into your own image
+# and drop the apt line). The pod runs: detect-jdk-8392044.sh -q --no-disk, so it
+# reports the node's running JVMs (including those in other pods) and skips the
+# detector pod's own empty filesystem.
+#
+# Run:
+#   kubectl create namespace jdk8392044
+#   kubectl -n jdk8392044 create configmap detect --from-file=detect-jdk-8392044.sh
+#   kubectl apply -f k8s-jdk-8392044.yaml
+#   kubectl -n jdk8392044 rollout status daemonset/jdk8392044
+#   kubectl -n jdk8392044 logs -l app=jdk8392044 --tail=-1 --prefix --max-log-requests=500
+# Remove:
+#   kubectl delete namespace jdk8392044
+#
+# The result for a pod is true for the node it runs on. The same image can be
+# affected on one node type and not on another, so keep the node name (printed in
+# each pod's log) with each result.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: jdk8392044
+  namespace: jdk8392044
+spec:
+  selector:
+    matchLabels:
+      app: jdk8392044
+  template:
+    metadata:
+      labels:
+        app: jdk8392044
+    spec:
+      hostPID: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: detect
+          image: debian:stable-slim
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              command -v nsenter >/dev/null 2>&1 || \
+                (apt-get update && apt-get install -y --no-install-recommends util-linux) >/dev/null 2>&1 || true
+              echo "=== node: ${NODE_NAME} ==="
+              bash /scripts/detect-jdk-8392044.sh -q --no-disk || true
+              echo "=== end node: ${NODE_NAME} ==="
+              sleep infinity
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: detect
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: detect
+          configMap:
+            name: detect
