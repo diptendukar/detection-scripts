@@ -1,0 +1,452 @@
+<#
+.SYNOPSIS
+    Checks whether this host has a JVM exposed to JDK-8392044 (HotSpot x86-64
+    AVX-512 Base64 decodeBlock stub heap overwrite).
+
+.DESCRIPTION
+    The HotSpot x86-64 AVX-512 Base64 decode stub stores a full 64-byte vector
+    past the destination buffer when a 1-3 byte input tail ends in '='.
+
+    A JVM counts as impacted when all of these hold:
+      1. HotSpot VM: OpenJDK and its builds (Temurin, Corretto, Zulu, Microsoft,
+         Liberica, Red Hat, Oracle JDK, GraalVM JDK). OpenJ9 has no such stub.
+      2. 64-bit x86 JVM (os.arch amd64) on an x64 host.
+      3. Version 17.0.6 or later, and older than any fix listed in $FixedIn.
+      4. The JVM reports AVX-512 VBMI and AVX-512 BW and runs with UseAVX >= 3.
+         That is when HotSpot generates the AVX-512 decode stub.
+      5. Base64 intrinsics are on and the top-tier JIT can use them: not -Xint,
+         not TieredStopAtLevel < 4, not DisableIntrinsic=_base64_decodeBlock.
+
+    Conditions 4 and 5 are read from the JVM itself. Each JVM is started with
+    -version plus the -XX flags the running process was launched with, so the
+    result reflects CPU masking by hypervisors as well as tuning flags.
+
+    What gets checked:
+      - java.exe on PATH, JAVA_HOME, JavaSoft registry keys, and JDKs under
+        Program Files and the system drive
+      - every running java.exe / javaw.exe
+      - JVMs embedded in other programs (jvm.dll loaded), including Procrun
+        services such as Tomcat, whose options come from the registry
+      - any java binary passed with -Java
+
+    Flags come from each process's command line, Procrun options, and the
+    machine-level JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS and _JAVA_OPTIONS.
+    A running process's own environment is not readable from PowerShell, and
+    flags files (-XX:Flags=, -XX:VMOptionsFile=, @argfiles) are not parsed;
+    such JVMs are flagged in the output. Only flags that affect the verdict are
+    replayed, so probing never loads agents or application code.
+
+    Exit codes, for fleet tooling:
+      0  not impacted
+      1  impacted: at least one JVM meets all conditions
+      2  unknown: at least one JVM could not be evaluated and none is impacted
+      3  usage error
+
+    The last line of output is exactly one of: impacted | not impacted | unknown.
+    If PowerShell itself rejects the arguments, powershell.exe exits 1 before
+    the script runs and that line is missing. Fleet tooling should treat exit
+    1 as impacted only when the last line says so.
+
+    Works with Windows PowerShell 5.1 and PowerShell 7. Run elevated for full
+    coverage of other users' processes and services.
+
+.PARAMETER Java
+    Additional java.exe paths to check.
+
+.PARAMETER JvmOptions
+    JVM options to apply when probing installed (not running) JVMs. Pass the
+    value with a colon, -JvmOptions:'-XX:UseAVX=2', because under -File
+    PowerShell reads a separate value that starts with '-' as a parameter
+    name. Defaults to $env:JDK8392044_JVM_OPTIONS.
+
+.PARAMETER FixedIn
+    Versions that contain the fix, one per feature release. The highest entry
+    also covers every later feature release. Defaults to $env:JDK8392044_FIXED_IN
+    (space separated). None was public as of 2026-11-16.
+
+.EXAMPLE
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File Detect-Jdk8392044.ps1 -Quiet
+#>
+[CmdletBinding()]
+param(
+    [string[]]$Java = @(),
+    [string]$JvmOptions = '',
+    [string[]]$FixedIn = @(),
+    [switch]$NoProcesses,
+    [switch]$NoDisk,
+    [switch]$Quiet,
+    [int]$ProbeTimeoutSec = 30
+)
+
+$ErrorActionPreference = 'Continue'
+
+trap {
+    Write-Output ("error: {0}: {1} {2}" -f $_.Exception.GetType().FullName, $_.Exception.Message,
+        $_.InvocationInfo.PositionMessage)
+    Write-Output 'unknown'
+    exit 2
+}
+
+if (-not $JvmOptions -and $env:JDK8392044_JVM_OPTIONS) { $JvmOptions = $env:JDK8392044_JVM_OPTIONS }
+if (-not $FixedIn -or $FixedIn.Count -eq 0) {
+    $FixedIn = @(($env:JDK8392044_FIXED_IN -split '\s+') | Where-Object { $_ })
+}
+
+$script:NImpacted = 0
+$script:NUnknown = 0
+$script:NOk = 0
+$script:Cache = @{}
+
+$OnWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or $IsWindows
+$JavaName = if ($OnWindows) { 'java.exe' } else { 'java' }
+
+function Say([string]$Text) {
+    if (-not $Quiet) { Write-Output $Text }
+}
+
+function Report([string]$Status, [string]$Text) {
+    switch ($Status) {
+        'impacted' { $script:NImpacted++; Say "[IMPACTED] $Text" }
+        'unknown'  { $script:NUnknown++;  Say "[UNKNOWN]  $Text" }
+        default    { $script:NOk++;       Say "[ok]       $Text" }
+    }
+}
+
+function Finish {
+    if ($script:NImpacted -gt 0) { Write-Output 'impacted'; exit 1 }
+    if ($script:NUnknown -gt 0) { Write-Output 'unknown'; exit 2 }
+    if ($script:NOk -eq 0) { Say 'no JVMs found' }
+    Write-Output 'not impacted'
+    exit 0
+}
+
+# --- Host architecture -------------------------------------------------------
+
+$hostArch = $null
+try {
+    $hostArch = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+} catch { }
+if (-not $hostArch) {
+    $hostArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+}
+if ($hostArch -notin @('X64', 'AMD64')) {
+    Say "host architecture is $hostArch, not x86-64"
+    Write-Output 'not impacted'
+    exit 0
+}
+
+# AVX-512 VBMI + BW as the OS and runtime report them: yes, no or unknown.
+# Used only when a JVM does not log its own CPU features.
+function Get-HostCpu {
+    $vbmiType = 'System.Runtime.Intrinsics.X86.Avx512Vbmi' -as [type]
+    $bwType = 'System.Runtime.Intrinsics.X86.Avx512BW' -as [type]
+    if ($vbmiType -and $bwType) {
+        if ($vbmiType::IsSupported -and $bwType::IsSupported) { return 'yes' } else { return 'no' }
+    }
+    if ($OnWindows) {
+        try {
+            if (-not ('J8392044.K32' -as [type])) {
+                Add-Type -Namespace J8392044 -Name K32 -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern bool IsProcessorFeaturePresent(uint feature);
+'@
+            }
+            # PF_AVX512F_INSTRUCTIONS_AVAILABLE. No AVX-512F means no VBMI.
+            if (-not [J8392044.K32]::IsProcessorFeaturePresent(41)) { return 'no' }
+        } catch { }
+    }
+    return 'unknown'
+}
+$HostCpu = Get-HostCpu
+Write-Verbose "host $hostArch, OS-reported AVX-512 VBMI+BW: $HostCpu"
+
+# --- Helpers ------------------------------------------------------------------
+
+# "17.0.6", "1.8.0_392", "21", "17.0.6+10", "27.0.1.0.3" -> sortable integer
+function Get-VerKey([string]$Version) {
+    $v = $Version
+    if ($v.StartsWith('1.')) { $v = $v.Substring(2) }
+    $parts = @([regex]::Matches($v, '\d+') | ForEach-Object { [long]$_.Value })
+    while ($parts.Count -lt 3) { $parts += 0 }
+    return $parts[0] * 1000000 + $parts[1] * 1000 + $parts[2]
+}
+
+$MinKey = Get-VerKey '17.0.6'
+
+function Test-Fixed([string]$Version) {
+    $k = Get-VerKey $Version
+    $top = 0
+    foreach ($f in $FixedIn) {
+        $fk = Get-VerKey $f
+        $fm = [math]::Floor($fk / 1000000)
+        if ($fm -gt $top) { $top = $fm }
+        if ($fm -eq [math]::Floor($k / 1000000) -and $k -ge $fk) { return $true }
+    }
+    return ($top -gt 0 -and [math]::Floor($k / 1000000) -gt $top)
+}
+
+$FlagPattern = '^-XX:([+-](UseBASE64Intrinsics|UnlockDiagnosticVMOptions|UseCompiler|TieredCompilation|EnableJVMCI|UseJVMCICompiler)|(UseAVX|TieredStopAtLevel|DisableIntrinsic)=\S*)$|^-Xint$'
+
+# Splits option strings on whitespace and keeps only the options that change
+# the verdict. Order is preserved; later options win in the JVM.
+function Select-Flags([string[]]$Text) {
+    $out = @()
+    foreach ($t in $Text) {
+        if (-not $t) { continue }
+        foreach ($tok in ($t -split '\s+')) {
+            $tok = $tok.Trim('"')
+            if ($tok -match $FlagPattern) { $out += $tok }
+        }
+    }
+    return , $out
+}
+
+function Get-FlagFileNote([string]$CommandLine) {
+    if ($CommandLine -match '(^|\s)"?(-XX:(Flags|VMOptionsFile)=|@)') {
+        return ' [flags file or @argfile not parsed]'
+    }
+    return ''
+}
+
+function Invoke-Java([string]$Exe, [string[]]$ArgList) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = ($ArgList | ForEach-Object {
+            if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+        }) -join ' '
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    $psi.CreateNoWindow = $true
+    foreach ($v in 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS') {
+        if ($psi.EnvironmentVariables.ContainsKey($v)) { $psi.EnvironmentVariables.Remove($v) }
+    }
+    try {
+        $p = [System.Diagnostics.Process]::Start($psi)
+    } catch {
+        return "failed to start: $($_.Exception.Message)"
+    }
+    $p.StandardInput.Close()
+    $so = $p.StandardOutput.ReadToEndAsync()
+    $se = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit($ProbeTimeoutSec * 1000)) {
+        try { $p.Kill() } catch { }
+        return "timed out after $ProbeTimeoutSec s"
+    }
+    return $so.Result + "`n" + $se.Result
+}
+
+function Get-Prop([string]$Out, [string]$Name) {
+    $m = [regex]::Match($Out, '(?m)^\s*' + [regex]::Escape($Name) + ' = (.*?)\r?$')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ''
+}
+
+# PrintFlagsFinal line: "<type> <name> = <value> {kind} {origin}". Empty ccstr
+# values leave "{kind}" in the value slot.
+function Get-FlagVal([string]$Out, [string]$Name) {
+    $m = [regex]::Match($Out, '(?m)^\s*\S+\s+' + [regex]::Escape($Name) + '\s+:?=\s*(\S*)')
+    if (-not $m.Success) { return '' }
+    $v = $m.Groups[1].Value
+    if ($v.StartsWith('{')) { return '' }
+    return $v
+}
+
+function Test-VbmiBw([string]$Features) {
+    $toks = @(($Features.ToLowerInvariant() -replace '_', '') -split '[\s,]+')
+    if (($toks -contains 'avx512vbmi') -and ($toks -contains 'avx512bw')) { return 'yes' }
+    return 'no'
+}
+
+# --- Probe ----------------------------------------------------------------------
+
+function Invoke-Probe([string]$Label, [string]$JavaExe, [string[]]$Flags, [string]$Note) {
+    $key = $JavaExe + '|' + ($Flags -join ' ')
+    if (-not $script:Cache.ContainsKey($key + '|1')) {
+        $script:Cache[$key + '|1'] = Invoke-Java $JavaExe @('-XshowSettings:properties', '-version')
+    }
+    $o1 = $script:Cache[$key + '|1']
+
+    $ver = Get-Prop $o1 'java.version'
+    $vm = Get-Prop $o1 'java.vm.name'
+    $arch = Get-Prop $o1 'os.arch'
+    if (-not $ver) {
+        $first = ($o1 -split "`r?`n" | Where-Object { $_ } | Select-Object -First 1)
+        Report 'unknown' "$Label $JavaExe${Note}: could not run it: $first"
+        return
+    }
+    $desc = "$Label $JavaExe ($ver, $vm)$Note"
+
+    if ($vm -match 'J9') { Report 'ok' "${desc}: not HotSpot"; return }
+    if ($arch -notin @('amd64', 'x86_64')) { Report 'ok' "${desc}: os.arch=$arch"; return }
+    if ((Get-VerKey $ver) -lt $MinKey) { Report 'ok' "${desc}: older than 17.0.6"; return }
+    if (Test-Fixed $ver) { Report 'ok' "${desc}: fixed version"; return }
+
+    if (-not $script:Cache.ContainsKey($key + '|2')) {
+        $probeArgs = @('-XX:+IgnoreUnrecognizedVMOptions', '-XX:+UnlockDiagnosticVMOptions') +
+            $Flags + @('-Xlog:os+cpu=info', '-XX:+PrintFlagsFinal', '-version')
+        $script:Cache[$key + '|2'] = Invoke-Java $JavaExe $probeArgs
+    }
+    $o2 = $script:Cache[$key + '|2']
+
+    $useAvx = Get-FlagVal $o2 'UseAVX'
+    $b64 = Get-FlagVal $o2 'UseBASE64Intrinsics'
+    $comp = Get-FlagVal $o2 'UseCompiler'
+    $tiered = Get-FlagVal $o2 'TieredCompilation'
+    $stop = Get-FlagVal $o2 'TieredStopAtLevel'
+    $dis = Get-FlagVal $o2 'DisableIntrinsic'
+    Write-Verbose "$JavaExe flags[$($Flags -join ' ')] UseAVX=$useAvx b64=$b64 comp=$comp tiered=$tiered stop=$stop dis=$dis"
+
+    if ($useAvx -notmatch '^\d+$') { Report 'unknown' "${desc}: could not read VM flags"; return }
+    if ([int]$useAvx -lt 3) { Report 'ok' "${desc}: UseAVX=$useAvx, AVX-512 stub not generated"; return }
+
+    $m = [regex]::Match($o2, '(?m)os,cpu.*?CPU:(.*)$')
+    if ($m.Success) {
+        $vbmi = Test-VbmiBw $m.Groups[1].Value
+    } else {
+        $vbmi = $HostCpu
+        Write-Verbose "$JavaExe did not log CPU features; using OS view ($HostCpu)"
+    }
+    if ($vbmi -eq 'no') { Report 'ok' "${desc}: no AVX-512 VBMI/BW visible to the JVM"; return }
+    if ($vbmi -eq 'unknown') { Report 'unknown' "${desc}: could not determine AVX-512 VBMI support"; return }
+
+    if ($b64 -eq 'false') { Report 'ok' "${desc}: mitigated, -XX:-UseBASE64Intrinsics"; return }
+    if ($dis -match '_base64_decodeBlock') { Report 'ok' "${desc}: mitigated, DisableIntrinsic=$dis"; return }
+    if ($comp -eq 'false') { Report 'ok' "${desc}: interpreter only"; return }
+    if ($tiered -eq 'true' -and $stop -match '^[0-3]$') {
+        Report 'ok' "${desc}: TieredStopAtLevel=$stop, no top-tier JIT"; return
+    }
+
+    Report 'impacted' "${desc}: AVX-512 Base64 decode stub active (UseAVX=$useAvx)"
+}
+
+# --- Machine-level option variables ---------------------------------------------
+
+function Get-EnvOpt([string]$Name) {
+    $v = $null
+    if ($OnWindows) { $v = [Environment]::GetEnvironmentVariable($Name, 'Machine') }
+    if (-not $v) { $v = [Environment]::GetEnvironmentVariable($Name) }
+    return $v
+}
+# Precedence: JAVA_TOOL_OPTIONS < JDK_JAVA_OPTIONS < command line < _JAVA_OPTIONS
+$EnvPre = @(Get-EnvOpt 'JAVA_TOOL_OPTIONS') + @(Get-EnvOpt 'JDK_JAVA_OPTIONS')
+$EnvPost = @(Get-EnvOpt '_JAVA_OPTIONS')
+
+# --- Installed JVMs -------------------------------------------------------------
+
+$cands = New-Object System.Collections.Generic.List[string]
+function Add-Cand([string]$Path) {
+    if (-not $Path) { return }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    $full = (Resolve-Path -LiteralPath $Path).ProviderPath
+    if (-not $cands.Contains($full)) { $cands.Add($full) }
+}
+
+if (-not $NoDisk) {
+    foreach ($c in @(Get-Command $JavaName -All -CommandType Application -ErrorAction SilentlyContinue)) {
+        Add-Cand $c.Source
+    }
+    if ($env:JAVA_HOME) { Add-Cand (Join-Path $env:JAVA_HOME "bin\$JavaName") }
+    if ($OnWindows) {
+        foreach ($root in 'HKLM:\SOFTWARE\JavaSoft\JDK', 'HKLM:\SOFTWARE\JavaSoft\JRE',
+            'HKLM:\SOFTWARE\JavaSoft\Java Development Kit', 'HKLM:\SOFTWARE\JavaSoft\Java Runtime Environment') {
+            foreach ($k in @(Get-ChildItem -Path $root -ErrorAction SilentlyContinue)) {
+                $jh = (Get-ItemProperty -Path $k.PSPath -Name JavaHome -ErrorAction SilentlyContinue).JavaHome
+                if ($jh) { Add-Cand (Join-Path $jh 'bin\java.exe') }
+            }
+        }
+        $roots = @($env:ProgramFiles, $env:SystemDrive + '\', "$env:SystemDrive\tools") | Where-Object { $_ }
+        foreach ($r in $roots) {
+            foreach ($pattern in '*\bin\java.exe', '*\*\bin\java.exe') {
+                foreach ($f in @(Get-ChildItem -Path (Join-Path $r $pattern) -ErrorAction SilentlyContinue)) {
+                    Add-Cand $f.FullName
+                }
+            }
+        }
+    }
+}
+foreach ($j in $Java) {
+    if (Test-Path -LiteralPath $j -PathType Leaf) { Add-Cand $j } else { Report 'unknown' "${j}: not a file" }
+}
+
+# --- Running JVMs ---------------------------------------------------------------
+# Collected before any probe starts, so probes never see each other.
+
+$procs = @()
+if (-not $NoProcesses) {
+    if (-not $OnWindows) {
+        Say "process scan supported on Windows only; use detect-jdk-8392044.sh here"
+    } else {
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+        $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+        $byPid = @{}
+        foreach ($p in $all) { $byPid[[int]$p.ProcessId] = $p }
+
+        foreach ($p in $all) {
+            if ($p.Name -notin @('java.exe', 'javaw.exe')) { continue }
+            if ($p.ProcessId -eq $PID) { continue }
+            if (-not $p.ExecutablePath) {
+                Report 'unknown' "pid $($p.ProcessId) $($p.Name): cannot read its path; run elevated"
+                continue
+            }
+            $procs += [pscustomobject]@{
+                Pid = $p.ProcessId; Java = $p.ExecutablePath
+                CmdFlags = Select-Flags @($p.CommandLine)
+                Note = Get-FlagFileNote $p.CommandLine
+            }
+        }
+
+        # JVMs embedded in other executables, e.g. Procrun services (tomcat9.exe).
+        foreach ($gp in @(Get-Process -ErrorAction SilentlyContinue)) {
+            if ($gp.ProcessName -in @('java', 'javaw') -or $gp.Id -eq $PID) { continue }
+            $mod = $null
+            try {
+                $mod = $gp.Modules | Where-Object { $_.ModuleName -eq 'jvm.dll' } | Select-Object -First 1
+            } catch { continue }
+            if (-not $mod) { continue }
+            # <home>\bin\server\jvm.dll -> <home>\bin\java.exe
+            $jhome = Split-Path (Split-Path (Split-Path $mod.FileName))
+            $jexe = Join-Path $jhome 'bin\java.exe'
+            $cl = if ($byPid.ContainsKey($gp.Id)) { $byPid[$gp.Id].CommandLine } else { '' }
+            $opts = @($cl)
+            $svc = Get-CimInstance Win32_Service -Filter "ProcessId=$($gp.Id)" -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($svc) {
+                foreach ($pr in 'HKLM:\SOFTWARE\WOW6432Node\Apache Software Foundation\Procrun 2.0',
+                    'HKLM:\SOFTWARE\Apache Software Foundation\Procrun 2.0') {
+                    $kp = Join-Path $pr "$($svc.Name)\Parameters\Java"
+                    $ji = Get-ItemProperty -Path $kp -ErrorAction SilentlyContinue
+                    if ($ji) { $opts += @($ji.Options) + @($ji.Options9) }
+                }
+            }
+            if (-not (Test-Path -LiteralPath $jexe -PathType Leaf)) {
+                Report 'unknown' "pid $($gp.Id) $($gp.Path): embedded JVM $($mod.FileName) has no bin\java.exe to probe"
+                continue
+            }
+            $procs += [pscustomobject]@{
+                Pid = $gp.Id; Java = $jexe
+                CmdFlags = Select-Flags $opts
+                Note = " [JVM embedded in $($gp.Path)]" + (Get-FlagFileNote ($opts -join ' '))
+            }
+        }
+        if (-not $isAdmin) { Say 'note: not elevated; other users'' processes and services may be missed' }
+    }
+}
+
+# --- Evaluate -------------------------------------------------------------------
+
+$diskFlags = Select-Flags ($EnvPre + @($JvmOptions) + $EnvPost)
+foreach ($c in $cands) {
+    Invoke-Probe 'installed' $c $diskFlags ''
+}
+
+$envPreFlags = Select-Flags $EnvPre
+$envPostFlags = Select-Flags $EnvPost
+foreach ($p in $procs) {
+    $flags = @($envPreFlags) + @($p.CmdFlags) + @($envPostFlags)
+    Invoke-Probe "pid $($p.Pid)" $p.Java $flags $p.Note
+}
+
+Finish
