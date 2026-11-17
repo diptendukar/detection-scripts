@@ -127,22 +127,41 @@ tally() {
     esac
 }
 
-# One test line: name, value, state.
-line() { say "  $1: $2 [$3]"; }
+# State -> marker. [!] impacted, OK not impacted, [?] unknown, n/a not checked.
+mark() {
+    case "$1" in
+        impacted) echo "[!]" ;;
+        ok) echo "OK" ;;
+        unknown) echo "[?]" ;;
+        *) echo "n/a" ;;
+    esac
+}
+
+# Result line for a JVM.
+result_line() {
+    case "$1" in
+        impacted) say "  => [!] impacted" ;;
+        ok) say "  => OK" ;;
+        *) say "  => [?] unknown" ;;
+    esac
+}
+
+# One check line: name, value, state.
+line() { say "  $1: $2 $(mark "$3")"; }
 
 # A JVM that could not be probed: title, test name, value, state.
 single() {
     say ""
     say "$1"
     line "$2" "$3" "$4"
-    say "  => [$4]"
+    result_line "$4"
     tally "$4"
 }
 
 header() {
     say "JDK-8392044 check: HotSpot x86-64 AVX-512 Base64 decode heap overwrite"
-    say "states: [impacted] condition met | [ok] condition not met, JVM safe | [unknown] could not check | [n/a] not checked"
-    say "tests:  arch, vm, java version, avx-512, base64 intrinsic. A JVM is impacted only if all five are [impacted]."
+    say "legend: [!] impacted | OK not impacted | [?] could not check | n/a not checked"
+    say "checks: arch, vm, java version, avx-512, base64 intrinsic. A JVM is impacted only if all five show [!]."
 }
 
 finish() {
@@ -166,7 +185,7 @@ IS_ROOT=0
 header
 case "$HOST_ARCH" in
     x86_64|amd64|AMD64) say "host:   $HOST_OS $HOST_ARCH" ;;
-    *) say "host:   $HOST_OS $HOST_ARCH [ok], not x86-64"; say ""; echo "not impacted"; exit 0 ;;
+    *) say "host:   $HOST_OS $HOST_ARCH OK, not x86-64"; say ""; echo "not impacted"; exit 0 ;;
 esac
 
 # AVX-512 VBMI + BW as the OS reports them: yes, no or unknown. Used only when
@@ -343,7 +362,7 @@ probe() {
     line "java version" "$v_ver" "$s_ver"
     line "avx-512" "$v_avx" "$s_avx"
     line "base64 intrinsic" "$v_b64" "$s_b64"
-    say "  => [$result]"
+    result_line "$result"
     tally "$result"
 }
 

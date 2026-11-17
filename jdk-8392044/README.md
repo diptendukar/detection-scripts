@@ -31,25 +31,28 @@ replayed, so a probe never loads an agent or any application code.
 
 ```
 JDK-8392044 check: HotSpot x86-64 AVX-512 Base64 decode heap overwrite
-states: [impacted] condition met | [ok] condition not met, JVM safe | [unknown] could not check | [n/a] not checked
-tests:  arch, vm, java version, avx-512, base64 intrinsic. A JVM is impacted only if all five are [impacted].
+legend: [!] impacted | OK not impacted | [?] could not check | n/a not checked
+checks: arch, vm, java version, avx-512, base64 intrinsic. A JVM is impacted only if all five show [!].
 host:   Linux x86_64
 
 /usr/lib/jvm/temurin-17-jdk-amd64/bin/java (pid 4242, container)
-  arch: amd64 [impacted]
-  vm: OpenJDK 64-Bit Server VM [impacted]
-  java version: 17.0.21 [impacted]
-  avx-512: vbmi+bw, UseAVX=3 [impacted]
-  base64 intrinsic: on [impacted]
-  => [impacted]
+  arch: amd64 [!]
+  vm: OpenJDK 64-Bit Server VM [!]
+  java version: 17.0.21 [!]
+  avx-512: vbmi+bw, UseAVX=3 [!]
+  base64 intrinsic: on [!]
+  => [!] impacted
 
 impacted
 ```
 
-Each JVM is one block. The title line names the binary and where it came
-from: `installed`, `pid N`, `container`, `embedded in <program>`, `-j`. A JVM
-that cannot be probed gets a single test line instead, e.g.
-`binary: replaced on disk after start, restart it [unknown]`. `-q` / `-Quiet`
+Each JVM is one block. Each check ends in `[!]` (points to impacted), `OK`
+(rules this JVM out), `[?]` (could not check) or `n/a` (not checked, because
+an earlier check already ruled the JVM out). The title line names the binary
+and where it came from: `installed`, `pid N`, `container`,
+`embedded in <program>`, `-j`. A JVM that cannot be probed gets a single
+check line instead, e.g.
+`binary: replaced on disk after start, restart it [?]`. `-q` / `-Quiet`
 prints only the verdict line.
 
 ## Exit codes

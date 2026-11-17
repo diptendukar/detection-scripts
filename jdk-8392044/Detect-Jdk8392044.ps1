@@ -115,9 +115,28 @@ function Tally([string]$Status) {
     }
 }
 
-# One test line: name, value, state.
+# State -> marker. [!] impacted, OK not impacted, [?] unknown, n/a not checked.
+function Get-Mark([string]$State) {
+    switch ($State) {
+        'impacted' { return '[!]' }
+        'ok' { return 'OK' }
+        'unknown' { return '[?]' }
+        default { return 'n/a' }
+    }
+}
+
+# Result line for a JVM.
+function Result-Line([string]$State) {
+    switch ($State) {
+        'impacted' { Say '  => [!] impacted' }
+        'ok' { Say '  => OK' }
+        default { Say '  => [?] unknown' }
+    }
+}
+
+# One check line: name, value, state.
 function Line([string]$Name, [string]$Value, [string]$State) {
-    Say "  ${Name}: $Value [$State]"
+    Say "  ${Name}: $Value $(Get-Mark $State)"
 }
 
 # A JVM that could not be probed: title, test name, value, state.
@@ -125,7 +144,7 @@ function Single([string]$Title, [string]$Name, [string]$Value, [string]$State) {
     Say ''
     Say $Title
     Line $Name $Value $State
-    Say "  => [$State]"
+    Result-Line $State
     Tally $State
 }
 
@@ -139,8 +158,8 @@ function Finish {
 }
 
 Say 'JDK-8392044 check: HotSpot x86-64 AVX-512 Base64 decode heap overwrite'
-Say 'states: [impacted] condition met | [ok] condition not met, JVM safe | [unknown] could not check | [n/a] not checked'
-Say 'tests:  arch, vm, java version, avx-512, base64 intrinsic. A JVM is impacted only if all five are [impacted].'
+Say 'legend: [!] impacted | OK not impacted | [?] could not check | n/a not checked'
+Say 'checks: arch, vm, java version, avx-512, base64 intrinsic. A JVM is impacted only if all five show [!].'
 
 # --- Host architecture -------------------------------------------------------
 
@@ -152,7 +171,7 @@ if (-not $hostArch) {
     $hostArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 }
 if ($hostArch -notin @('X64', 'AMD64')) {
-    Say "host:   $hostArch [ok], not x86-64"
+    Say "host:   $hostArch OK, not x86-64"
     Say ''
     Write-Output 'not impacted'
     exit 0
@@ -364,7 +383,7 @@ function Invoke-Probe([string]$Title, [string]$JavaExe, [string[]]$Flags) {
     Line 'java version' $vVer $sVer
     Line 'avx-512' $vAvx $sAvx
     Line 'base64 intrinsic' $vB64 $sB64
-    Say "  => [$result]"
+    Result-Line $result
     Tally $result
 }
 
