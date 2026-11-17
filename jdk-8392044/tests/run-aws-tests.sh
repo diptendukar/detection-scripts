@@ -343,7 +343,7 @@ check_block "emr 6 java 8 -> OK" "emr us-east-1 j-2 (old6)" "java version: 8 (em
 check_block "emr 6 JAVA_HOME 17 on m5 -> OK" "emr us-east-1 j-3 (m5j17)" \
     "java version: 17 (JAVA_HOME in configurations) [!]" "avx-512: no vbmi (m5) OK" "=> OK"
 
-if grep -vE ' (lambda (list-functions|list-provisioned-concurrency-configs|get-capacity-provider)|ecs (list-clusters|list-tasks|describe-tasks|describe-container-instances|describe-task-definition)|ec2 (describe-instances|describe-instance-attribute|describe-regions)|ssm list-inventory-entries|elasticbeanstalk (describe-environments|describe-configuration-settings)|emr (list-clusters|describe-cluster|list-instances)|sts get-caller-identity)( |$)' \
+if grep -vE ' (lambda (list-functions|list-provisioned-concurrency-configs|get-capacity-provider)|ecs (list-clusters|list-tasks|describe-tasks|describe-container-instances|describe-task-definition)|ec2 (describe-instances|describe-instance-attribute|describe-regions)|account list-regions|ssm list-inventory-entries|elasticbeanstalk (describe-environments|describe-configuration-settings)|emr (list-clusters|describe-cluster|list-instances)|sts get-caller-identity)( |$)' \
         "$FAKE_AWS_LOG" | grep -q .; then
     ok=0
 else
@@ -363,10 +363,24 @@ check "quiet prints one line" 1
 assert "quiet output is exactly one line" "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')" = 1
 
 run bash "$S" -r us-west-2
-check "denied listing -> unknown" 2 "api: list-functions failed: AccessDeniedException [?]"
+check "denied listing -> unknown" 2 "api: list-functions failed: AccessDeniedException [?]" \
+    "note: 1 listing(s) denied."
 
 run bash "$S"
 check "regions from describe-regions" 1 "regions: us-east-1 us-west-2"
+
+mv "$F/ec2.describe-regions.json" "$F/ec2.describe-regions.off"
+echo 'An error occurred (UnauthorizedOperation) when calling the DescribeRegions operation: denied' \
+    > "$F/ec2.describe-regions.err"
+run bash "$S" -s beanstalk
+check "region listing denied -> default regions" 1 \
+    "note: region listing denied; checking the 17 default regions." \
+    "regions: us-east-1 us-east-2 us-west-1 us-west-2 ca-central-1"
+echo '{"Regions":[{"RegionName":"us-east-1"},{"RegionName":"ap-east-1"}]}' > "$F/account.list-regions.json"
+run bash "$S" -s beanstalk
+check "region listing via account:ListRegions" 1 "regions: ap-east-1 us-east-1"
+rm -f "$F/ec2.describe-regions.err" "$F/account.list-regions.json"
+mv "$F/ec2.describe-regions.off" "$F/ec2.describe-regions.json"
 
 run bash "$S" -s lambda -r us-east-1
 check "service filter" 1 "services: lambda"

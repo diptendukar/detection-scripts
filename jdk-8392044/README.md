@@ -145,6 +145,45 @@ somewhere that may not reach the JVM (user data, EMR configurations,
 values and user data are reduced to the allowed JVM flags before anything is
 printed, so secrets in them never reach the output.
 
+### IAM permissions
+
+All calls are read-only. The AWS managed policy `ReadOnlyAccess` covers
+them; a minimal policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Resource": "*",
+    "Action": [
+      "sts:GetCallerIdentity", "ec2:DescribeRegions", "account:ListRegions",
+      "lambda:ListFunctions", "lambda:ListProvisionedConcurrencyConfigs",
+      "lambda:GetCapacityProvider",
+      "ecs:ListClusters", "ecs:ListTasks", "ecs:DescribeTasks",
+      "ecs:DescribeContainerInstances", "ecs:DescribeTaskDefinition",
+      "ec2:DescribeInstances", "ec2:DescribeInstanceAttribute",
+      "ssm:ListInventoryEntries",
+      "elasticbeanstalk:DescribeEnvironments",
+      "elasticbeanstalk:DescribeConfigurationSettings",
+      "emr:ListClusters", "emr:DescribeCluster", "emr:ListInstances"
+    ]
+  }]
+}
+```
+
+`lambda:ListFunctions`, `ecs:DescribeTaskDefinition`,
+`ec2:DescribeInstanceAttribute` (user data) and
+`elasticbeanstalk:DescribeConfigurationSettings` return environment values,
+which can include secrets. The script keeps only the allowed JVM flags, but
+the role itself can read those values, so grant it with that in mind. Lambda
+environments encrypted with a customer-managed KMS key also need
+`kms:Decrypt`; without it those functions show `[?]`.
+
+Denied listings show as `[?]` per service and region, followed by a count.
+If `ec2:DescribeRegions` and `account:ListRegions` are both denied, the
+script checks the 17 default-enabled regions and says so.
+
 For anything left at `[?]`, run the host script on the instance, e.g. through
 SSM Run Command or ECS Exec. Not covered: EKS (use the host script as a
 DaemonSet), App Runner, Glue, Managed Flink, EMR Serverless.

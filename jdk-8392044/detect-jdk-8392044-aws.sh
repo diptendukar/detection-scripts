@@ -120,6 +120,7 @@ export AWS_PAGER=""
 N_IMPACTED=0
 N_UNKNOWN=0
 N_OK=0
+N_DENIED=0
 
 # JVM options that change the verdict. Same list as detect-jdk-8392044.sh.
 WL='^-XX:([+-](UseBASE64Intrinsics|UnlockDiagnosticVMOptions|UseCompiler|TieredCompilation|EnableJVMCI|UseJVMCICompiler)|(UseAVX|TieredStopAtLevel|DisableIntrinsic)=[^ ]*)$|^-Xint$'
@@ -225,6 +226,9 @@ end_block() {
 
 # A listing that failed: the whole service in that region is unknown.
 api_fail() {
+    case "$(err_code)" in
+        *AccessDenied*|*UnauthorizedOperation*|*NotAuthorized*|*Forbidden*) N_DENIED=$((N_DENIED + 1)) ;;
+    esac
     begin_block "$1" "$2" "$1 $2"
     chk "api" "$3 failed: $(err_code)" unknown
     end_block
@@ -253,6 +257,10 @@ finish() {
                     print "  " k ": " s
                 }
             }' "$TMP/summary"
+    fi
+    if [ "$N_DENIED" -gt 0 ]; then
+        say ""
+        say "note: $N_DENIED listing(s) denied. The role needs the read-only actions listed in README.md (IAM policy)."
     fi
     if [ "$N_IMPACTED" -gt 0 ]; then
         say ""
@@ -1103,17 +1111,27 @@ if ! ident=$(awsj "$HOME_REGION" sts get-caller-identity); then
 fi
 ACCOUNT=$(jq -r '.Account // "?"' <<<"$ident")
 
+# Regions enabled by default in every commercial account (no opt-in).
+DEFAULT_REGIONS="us-east-1 us-east-2 us-west-1 us-west-2 ca-central-1 eu-central-1
+eu-west-1 eu-west-2 eu-west-3 eu-north-1 ap-northeast-1 ap-northeast-2
+ap-northeast-3 ap-southeast-1 ap-southeast-2 ap-south-1 sa-east-1"
+REGION_NOTE=""
 if [ -z "$(printf '%s' "$REGIONS" | tr -d ' ')" ]; then
-    if ! out=$(awsj "$HOME_REGION" ec2 describe-regions); then
-        say "error: cannot list regions ($(err_code)); pass -r"
-        echo "unknown"; exit 2
+    if out=$(awsj "$HOME_REGION" ec2 describe-regions); then
+        REGIONS=$(jq -r '.Regions[].RegionName' <<<"$out" | sort | tr '\n' ' ')
+    elif out=$(awsj "$HOME_REGION" account list-regions \
+            --region-opt-status-contains ENABLED ENABLED_BY_DEFAULT); then
+        REGIONS=$(jq -r '.Regions[].RegionName' <<<"$out" | sort | tr '\n' ' ')
+    else
+        REGIONS=$(printf '%s' "$DEFAULT_REGIONS" | tr '\n' ' ')
+        REGION_NOTE="note: region listing denied; checking the 17 default regions. Pass -r for opt-in regions."
     fi
-    REGIONS=$(jq -r '.Regions[].RegionName' <<<"$out" | sort | tr '\n' ' ')
 fi
 REGIONS=$(printf '%s' "$REGIONS" | sed 's/^ *//; s/ *$//; s/  */ /g')
 
 say "account: $ACCOUNT  regions: $REGIONS"
 say "services: $SERVICES"
+[ -n "$REGION_NOTE" ] && say "$REGION_NOTE"
 
 for r in $REGIONS; do
     for s in $SERVICES; do
