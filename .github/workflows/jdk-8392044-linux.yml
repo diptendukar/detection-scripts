@@ -3,11 +3,13 @@ name: jdk-8392044 bash detector (Linux)
 on:
   push:
     paths:
-      - "jdk-8392044/**"
+      - "CVE-2026-114938/linux/**"
+      - "CVE-2026-114938/cloud/**"
       - ".github/workflows/jdk-8392044-linux.yml"
   pull_request:
     paths:
-      - "jdk-8392044/**"
+      - "CVE-2026-114938/linux/**"
+      - "CVE-2026-114938/cloud/**"
       - ".github/workflows/jdk-8392044-linux.yml"
   workflow_dispatch:
 
@@ -29,9 +31,9 @@ jobs:
       - name: shellcheck
         run: >-
           shellcheck -S warning
-          jdk-8392044/detect-jdk-8392044.sh jdk-8392044/tests/run-tests.sh jdk-8392044/tests/fake-java
-          jdk-8392044/detect-jdk-8392044-aws.sh jdk-8392044/tests/run-aws-tests.sh jdk-8392044/tests/fake-aws
-          jdk-8392044/detect-jdk-8392044-gcp.sh jdk-8392044/tests/run-gcp-tests.sh jdk-8392044/tests/fake-gcloud
+          CVE-2026-114938/linux/detect-jdk-8392044.sh CVE-2026-114938/linux/tests/run-tests.sh CVE-2026-114938/linux/tests/fake-java
+          CVE-2026-114938/cloud/detect-jdk-8392044-aws.sh CVE-2026-114938/cloud/tests/run-aws-tests.sh CVE-2026-114938/cloud/tests/fake-aws
+          CVE-2026-114938/cloud/detect-jdk-8392044-gcp.sh CVE-2026-114938/cloud/tests/run-gcp-tests.sh CVE-2026-114938/cloud/tests/fake-gcloud
 
   test:
     name: bash on ${{ matrix.os }}
@@ -56,12 +58,12 @@ jobs:
         run: docker pull "$CONTAINER_IMAGE"
 
       - name: Run tests
-        run: ./jdk-8392044/tests/run-tests.sh --container-image "$CONTAINER_IMAGE"
+        run: ./CVE-2026-114938/linux/tests/run-tests.sh --container-image "$CONTAINER_IMAGE"
 
       # AWS detector against tests/fake-aws fixtures; no AWS credentials.
       - name: Run AWS detector tests
-        run: ./jdk-8392044/tests/run-aws-tests.sh
+        run: ./CVE-2026-114938/cloud/tests/run-aws-tests.sh
 
       # GCP detector against tests/fake-gcloud fixtures; no GCP credentials.
       - name: Run GCP detector tests
-        run: ./jdk-8392044/tests/run-gcp-tests.sh
+        run: ./CVE-2026-114938/cloud/tests/run-gcp-tests.sh
