@@ -138,16 +138,24 @@ gj() {
     shift
     [ "$VERBOSE" -eq 1 ] && printf 'gcloud: %s --project %s\n' "$*" "$p" >&2
     if gcloud "$@" ${p:+--project "$p"} --format=json --quiet 2>"$TMP/err"; then
-        return 0
+        # Aggregated lists (compute) exit 0 with a partial or empty result
+        # and only warn on stderr when some requests fail. That is a failed
+        # listing, not an empty one.
+        grep -q 'Some requests did not succeed' "$TMP/err" || return 0
     fi
     if grep -qE 'SERVICE_DISABLED|has not been used in project|it is disabled|is not enabled' "$TMP/err"; then
         code=SERVICE_DISABLED
-    elif grep -q 'does not contain an App Engine application' "$TMP/err"; then
+    elif grep -qE 'does not contain an App Engine application|Apps instance \[[^]]*\] not found' "$TMP/err"; then
         code=NO_APP
+    elif grep -qE "Required '[^']*' permission" "$TMP/err"; then
+        code=PERMISSION_DENIED
     else
-        code=$(grep -oE 'PERMISSION_DENIED|UNAUTHENTICATED|NOT_FOUND|FAILED_PRECONDITION|INVALID_ARGUMENT|RESOURCE_EXHAUSTED|UNAVAILABLE|Reauthentication required|refreshing your current auth tokens|do not currently have an active account' \
+        code=$(grep -oE "PERMISSION_DENIED|UNAUTHENTICATED|NOT_FOUND|FAILED_PRECONDITION|INVALID_ARGUMENT|RESOURCE_EXHAUSTED|UNAVAILABLE|Reauthentication required|refreshing your current auth tokens|do not currently have an active account|Some requests did not succeed" \
             "$TMP/err" | head -1)
-        case "$code" in Reauth*|refreshing*|*"active account") code=UNAUTHENTICATED ;; esac
+        case "$code" in
+            Reauth*|refreshing*|*"active account") code=UNAUTHENTICATED ;;
+            "Some requests did not succeed") code=PARTIAL_FAILURE ;;
+        esac
         [ -n "$code" ] || code=$(grep -v '^ *$' "$TMP/err" | head -1 | sed 's/^ERROR: //' | cut -c1-120)
         [ -n "$code" ] || code="failed"
     fi
@@ -494,15 +502,16 @@ family_vbmi() {
     esac
 }
 
-# Java packages in OS Config inventory: id<TAB>name<TAB>version lines.
+# Java packages in one VM's OS Config inventory: name<TAB>version lines.
+# gcloud reshapes the API response (installed_packages.aptPackage[] rather
+# than items.*.installedPackage.aptPackage), so take every package object
+# wherever it sits.
 inventory_packages() {
-    jq -r '(if type == "array" then . else [.] end)[]
-        | (.name // "" | capture("instances/(?<id>[^/]+)/inventory") | .id) as $id
-        | (.items // {}) | to_entries[] | .value.installedPackage // empty
-        | (.yumPackage // .aptPackage // .zypperPackage // .googetPackage // .windowsApplication // {})
-        | [$id, (.packageName // .displayName // ""), (.version // .displayVersion // "")] | @tsv' |
-        grep -iE '	[^	]*(corretto|temurin|openjdk|zulu|liberica|semeru|graalvm|sapmachine|dragonwell|java-[0-9]|java-1\.|jdk|jre|java\(tm\)|java se)' |
-        grep -viE '	[^	]*(javascript|ca-certificates|tzdata|javapackages|java-common|default-j|wrappers|maven|atk-wrapper|jna|-headers|jdk-docs|jdk-src)'
+    jq -r '[.. | objects | select(has("packageName") or has("displayName"))
+            | [(.packageName // .displayName), (.version // .displayVersion // "")]]
+           | unique[] | @tsv' |
+        grep -iE '^[^	]*(corretto|temurin|openjdk|zulu|liberica|semeru|graalvm|sapmachine|dragonwell|java-[0-9]|java-1\.|jdk|jre|java\(tm\)|java se)' |
+        grep -viE '^[^	]*(javascript|ca-certificates|tzdata|javapackages|java-common|default-j|wrappers|maven|atk-wrapper|jna|-headers|jdk-docs|jdk-src)'
 }
 
 # Shared per-container evaluation for Cloud Run services and jobs.
@@ -706,7 +715,7 @@ cluster_note() {
 }
 
 scan_compute() {
-    local p=$1 out id name zone mt cpu gke dp md fam st zones z inv_ok="" invst
+    local p=$1 out id name zone mt cpu gke dp md fam st inv_ok="" invst
     if ! out=$(gj "$p" compute instances list --filter=status=RUNNING); then
         gcp_fail compute "$p" "compute instances list"
         return
@@ -738,21 +747,6 @@ scan_compute() {
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$zone" "$mt" "$cpu" "$gke" "$dp" "$md" "$st" >> "$TMP/gce_cand"
     done < "$TMP/gce"
 
-    # OS Config inventory, one call per zone.
-    : > "$TMP/gce_pk"
-    : > "$TMP/gce_invst"
-    zones=$(cut -f3 "$TMP/gce_cand" | sort -u)
-    for z in $zones; do
-        if out=$(gj "$p" compute os-config inventories list --location "$z" --view full); then
-            inventory_packages <<<"$out" >> "$TMP/gce_pk"
-            printf '%s\tok\n' "$z" >> "$TMP/gce_invst"
-        else
-            printf '%s\t%s\n' "$z" "$(err_code)" >> "$TMP/gce_invst"
-            case "$(err_code)" in PERMISSION_DENIED*) inv_ok=denied ;; esac
-        fi
-    done
-    [ "${inv_ok:-}" = denied ] && N_DENIED=$((N_DENIED + 1))
-
     : > "$TMP/gce_groups"
     while IFS="$(printf '\t')" read -r id name zone mt cpu gke dp md st; do
         [ "$md" = - ] && md=""
@@ -761,11 +755,21 @@ scan_compute() {
         [ "$dp" = - ] || cl="dataproc:$dp"
         local title="compute $p $zone $name $mt"
         if [ "$st" = yes ]; then X_ST=impacted X_VAL="vbmi+bw ($cpu)"; else X_ST=unknown X_VAL="CPU platform not known ($cpu, $mt)"; fi
-        invst=$(awk -F '\t' -v z="$zone" '$1 == z { print $2; exit }' "$TMP/gce_invst")
-        if [ "$invst" = ok ] && grep -q "^$id	" "$TMP/gce_pk"; then
-            grep "^$id	" "$TMP/gce_pk" | while IFS="$(printf '\t')" read -r _ pk pv; do
+        # OS Config inventory for this VM (the zone-level list only has counts).
+        : > "$TMP/gce_one"
+        if out=$(gj "$p" compute os-config inventories describe "$name" --location "$zone" --view=full); then
+            invst=ok
+            inventory_packages <<<"$out" | while IFS="$(printf '\t')" read -r pk pv; do
                 printf '%s\t%s\t%s\n' "$pk" "$pv" "$title"
             done > "$TMP/gce_one"
+        else
+            invst=$(err_code)
+            case "$invst" in
+                NOT_FOUND) invst=NOREPORT ;;
+                PERMISSION_DENIED*) inv_ok=denied ;;
+            esac
+        fi
+        if [ -s "$TMP/gce_one" ]; then
             while IFS="$(printf '\t')" read -r pk pv _; do
                 begin_block compute "$p" "$title $pk"
                 chk arch x86_64 impacted
@@ -789,6 +793,7 @@ scan_compute() {
         [ "$invst" = ok ] && invst=nojava
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${cl:--}" "${mt%%-*}" "$cpu" "${md:--}" "$invst" "$st" "$title" >> "$TMP/gce_groups"
     done < "$TMP/gce_cand"
+    [ "$inv_ok" = denied ] && N_DENIED=$((N_DENIED + 1))
     gce_group_blocks "$p"
 }
 
@@ -817,6 +822,7 @@ EOF
         chk arch x86_64 impacted
         case "$invst" in
             nojava) chk vm "no Java package in OS inventory" unknown ;;
+            NOREPORT) chk vm "no OS inventory reported for this VM" unknown ;;
             PERMISSION_DENIED*) chk vm "OS inventory denied ($invst)" unknown ;;
             SERVICE_DISABLED) chk vm "OS Config API not enabled" unknown ;;
             *) chk vm "no OS inventory ($invst)" unknown ;;

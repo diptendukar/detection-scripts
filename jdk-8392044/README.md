@@ -227,11 +227,18 @@ APIs that are not in use are listed as "not in use"; permission errors are
 Permissions (all read-only): `resourcemanager.projects.list`,
 `run.services.list`, `run.jobs.list`, `cloudfunctions.functions.list`,
 `appengine.versions.list`, `appengine.versions.get`,
-`compute.instances.list`, `osconfig.inventories.list`. `roles/viewer` on the
+`compute.instances.list`, `osconfig.inventories.get`. `roles/viewer` on the
 projects covers most of them. Cloud Run, functions and App Engine listings
 return environment values, and Compute Engine listings return startup
 scripts, which can include secrets. The script keeps only the allowed JVM
 flags.
+
+Verified end to end on 2026-11-17 against a throwaway project: one
+`n2-standard-2` VM on Intel Ice Lake with Ubuntu 24.04 and
+`openjdk-21-jre-headless` 21.0.13. The host script on the VM and this
+script from outside both reported `impacted` with all five checks `[!]`.
+The OS Config agent took about four minutes after boot to report inventory;
+until then the VM shows `no OS inventory reported for this VM [?]`.
 
 Not covered: GKE workloads (run the host script as a DaemonSet), Dataproc
 Serverless, Dataflow, Cloud Run worker pools.

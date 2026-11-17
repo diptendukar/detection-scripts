@@ -147,27 +147,39 @@ SS=$(printf '#!/bin/bash\\nexport JAVA_TOOL_OPTIONS=\\"-XX:-UseBASE64Intrinsics 
         vm "20$n" "gke-prod-pool-$n" us-central1-b n2-standard-8 "Intel Ice Lake" '{"goog-k8s-cluster-name":"prod-gke"}' '[]'; echo ,
     done
     vm 301 unk1 us-central1-c e2-medium "Unknown CPU Platform" '{}' '[]'; echo ,
+    vm 303 dis1 us-central1-d c3-standard-4 "Intel Sapphire Rapids" '{}' '[]'; echo ,
+    vm 401 raw1 us-central1-a c4-standard-2 "Intel Emerald Rapids" '{}' '[]'; echo ,
     vm 302 off1 us-central1-c c3-standard-4 "Intel Sapphire Rapids" '{}' '[]' TERMINATED
     echo ']'
 } > "$A/compute.instances.list.json"
-cat > "$A/compute.os-config.inventories.list_us-central1-a.json" <<'EOF'
-[{"name":"projects/demo-a/locations/us-central1-a/instances/101/inventory","items":{
-   "a":{"installedPackage":{"aptPackage":{"packageName":"openjdk-21-jre-headless","version":"21.0.5+11-1ubuntu1"}}},
-   "b":{"installedPackage":{"aptPackage":{"packageName":"ca-certificates-java","version":"20240118"}}}}},
- {"name":"projects/demo-a/locations/us-central1-a/instances/102/inventory","items":{
-   "a":{"installedPackage":{"aptPackage":{"packageName":"bash","version":"5.2"}}}}}]
-EOF
-echo "ERROR: (gcloud.compute.os-config.inventories.list) PERMISSION_DENIED: Permission 'osconfig.inventories.list' denied" \
-    > "$A/compute.os-config.inventories.list_us-central1-b.err"
-echo "ERROR: (gcloud.compute.os-config.inventories.list) OS Config API has not been used in project demo-a before or it is disabled. reason: SERVICE_DISABLED" \
-    > "$A/compute.os-config.inventories.list_us-central1-c.err"
+# Per-VM inventory. gcloud's reshaped form (as seen on a real VM,
+# 2026-11-17) and the raw API form must both parse.
+inv_desc() { printf '%s' "$3" > "$A/compute.os-config.inventories.describe.$1_$2.json"; }
+inv_desc hot1 us-central1-a '{"installed_packages":{"aptPackage":[
+  {"architecture":"x86_64","packageName":"openjdk-21-jre-headless","version":"21.0.5+11-1ubuntu1"},
+  {"architecture":"all","packageName":"ca-certificates-java","version":"20240118"},
+  {"architecture":"all","packageName":"java-common","version":"0.75"}]},"system_information":{}}'
+inv_desc md1 us-central1-a '{"installed_packages":{"aptPackage":[{"packageName":"bash","version":"5.2"}]}}'
+inv_desc raw1 us-central1-a '{"name":"projects/demo-a/locations/us-central1-a/instances/401/inventory","items":{
+  "a":{"installedPackage":{"aptPackage":{"packageName":"temurin-17-jdk","version":"17.0.13.0.0+11"}}}}}'
+for n in 1 2 3 4; do
+    echo "ERROR: (gcloud.compute.os-config.inventories.describe) PERMISSION_DENIED: Permission 'osconfig.inventories.get' denied" \
+        > "$A/compute.os-config.inventories.describe.gke-prod-pool-${n}_us-central1-b.err"
+done
+echo "ERROR: (gcloud.compute.os-config.inventories.describe) NOT_FOUND: Requested entity was not found." \
+    > "$A/compute.os-config.inventories.describe.unk1_us-central1-c.err"
+echo "ERROR: (gcloud.compute.os-config.inventories.describe) OS Config API has not been used in project demo-a before or it is disabled." \
+    > "$A/compute.os-config.inventories.describe.dis1_us-central1-d.err"
 
 # demo-b: denied, disabled and absent services -------------------------------------
 echo "ERROR: (gcloud.run.services.list) PERMISSION_DENIED: Permission 'run.services.list' denied on resource" > "$B/run.services.list.err"
 echo "ERROR: (gcloud.run.jobs.list) PERMISSION_DENIED: Permission 'run.jobs.list' denied on resource" > "$B/run.jobs.list.err"
 echo "ERROR: (gcloud.functions.list) Cloud Functions API has not been used in project demo-b before or it is disabled." > "$B/functions.list.err"
 echo "ERROR: (gcloud.app.versions.list) Project [demo-b] does not contain an App Engine application." > "$B/app.versions.list.err"
+# gcloud compute exits 0 with [] when the permission is missing.
 echo '[]' > "$B/compute.instances.list.json"
+printf "WARNING: Some requests did not succeed.\n - Required 'compute.instances.list' permission for 'projects/demo-b'\n" \
+    > "$B/compute.instances.list.warn"
 
 # ------------------------------------------------------------------ tests ---
 
@@ -229,14 +241,17 @@ check_block "compute: startup-script flag -> unknown" "compute demo-a us-central
 check_block "compute: GKE nodes grouped, inventory denied" "compute demo-a gke:prod-gke n2 (Intel Ice Lake, 4 instances)" \
     "vm: OS inventory denied (PERMISSION_DENIED) [?]" "avx-512: vbmi+bw (Intel Ice Lake) [!]" \
     "note: GKE node (cluster prod-gke)" "note: instances: gke-prod-pool-1 gke-prod-pool-2 gke-prod-pool-3 +1 more"
-check_block "compute: unknown CPU, OS Config off" "compute demo-a us-central1-c unk1 e2-medium" \
-    "vm: OS Config API not enabled [?]" "avx-512: CPU platform not known (Unknown CPU Platform, e2) [?]"
+check_block "compute: unknown CPU, no inventory reported" "compute demo-a us-central1-c unk1 e2-medium" \
+    "vm: no OS inventory reported for this VM [?]" "avx-512: CPU platform not known (Unknown CPU Platform, e2) [?]"
+check_block "compute: OS Config off" "compute demo-a us-central1-d dis1 c3-standard-4" "vm: OS Config API not enabled [?]"
+check_block "compute: raw API inventory shape" "compute demo-a us-central1-a raw1 c4-standard-2 temurin-17-jdk" \
+    "java version: 17.0.13.0.0 [!]" "avx-512: vbmi+bw (Intel Emerald Rapids) [!]" "=> [!] impacted"
 b=$(printf '%s\n' "$OUT" | grep -c 'off1')
 assert "compute: stopped VM ignored" "$b" -eq 0
-assert "compute: one inventory call per candidate zone" \
-    "$(grep -c 'os-config inventories list' "$FAKE_GCLOUD_LOG")" = 3
+assert "compute: one inventory call per candidate VM, none for ruled-out VMs" \
+    "$(grep -c 'os-config inventories describe' "$FAKE_GCLOUD_LOG")" = 9
 
-if grep -vE '^(projects list|config get-value|run (services|jobs) list|functions list|app versions (list|describe)|compute instances list|compute os-config inventories list)( |$)' \
+if grep -vE '^(projects list|config get-value|run (services|jobs) list|functions list|app versions (list|describe)|compute instances list|compute os-config inventories describe)( |$)' \
         "$FAKE_GCLOUD_LOG" | grep -q .; then ok=0; else ok=1; fi
 result "$ok" "only read-only calls"
 
@@ -244,7 +259,18 @@ echo "== denied, disabled and absent services"
 run bash "$S" -p demo-b
 check "demo-b -> unknown" 2 "api: run services list failed: PERMISSION_DENIED [?]" \
     "functions demo-b: not in use (API off or no app)" "appengine demo-b: not in use (API off or no app)" \
-    "note: 2 listing(s) denied."
+    "api: compute instances list failed: PERMISSION_DENIED [?]" "note: 3 listing(s) denied."
+cp "$B/compute.instances.list.warn" "$WORK/warn.keep"
+echo 'WARNING: Some requests did not succeed.' > "$B/compute.instances.list.warn"
+cp "$B/app.versions.list.err" "$WORK/app.keep"
+echo "ERROR: (gcloud.app.versions.list) Apps instance [demo-b] not found: Resource 'applications/demo-b' was not found." \
+    > "$B/app.versions.list.err"
+run bash "$S" -p demo-b -s appengine
+check "App Engine app not found -> not in use" 0 "appengine demo-b: not in use (API off or no app)"
+cp "$WORK/app.keep" "$B/app.versions.list.err"
+run bash "$S" -p demo-b -s compute
+check "partial compute listing -> unknown" 2 "api: compute instances list failed: PARTIAL_FAILURE [?]"
+cp "$WORK/warn.keep" "$B/compute.instances.list.warn"
 
 echo "== projects and options"
 run bash "$S"
