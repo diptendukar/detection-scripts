@@ -74,14 +74,30 @@ public fix.
 Not parsed: `-XX:Flags=`, `-XX:VMOptionsFile=`, `@argfiles`. JVMs that use
 them are tagged in the output.
 
-## Testing done (2026-11-16)
+## Testing
 
-- bash: an amd64 container (Temurin 21, Rosetta, so no AVX-512) checked the
-  installed and running-process paths and replay of `JAVA_TOOL_OPTIONS` from
-  `/proc/<pid>/environ`. A fake JVM fed real HotSpot output formats through
-  every decision branch, version boundary, the fixed-version list, flag
-  precedence and OpenJ9.
-- PowerShell: the same fake-JVM matrix ran on native arm64 pwsh 7, with the
-  host-architecture gate bypassed in a scratch copy. Still untested: Windows
-  PowerShell 5.1, the Windows-only discovery (CIM processes, `jvm.dll`
-  modules, Procrun registry), and any real AVX-512 VBMI hardware.
+CI runs on every change under `jdk-8392044/`:
+
+- `jdk-8392044-windows.yml`: `tests/Run-Tests.ps1` under Windows PowerShell
+  5.1 and PowerShell 7 on `windows-latest`.
+- `jdk-8392044-linux.yml`: shellcheck, then `tests/run-tests.sh` on
+  `ubuntu-latest` and `ubuntu-22.04`.
+
+Both harnesses use the same four layers:
+
+1. A fake JVM (`FakeJava.cs` / `fake-java`) drives every decision branch,
+   version boundary, fixed-version case and flag-precedence rule.
+2. Every runner JDK (8 to 25) is checked against the verdict derived from
+   that JVM's own `-Xlog:os+cpu` output.
+3. JVMs held at startup with `-XX:+PauseAtStartup` must be found, and their
+   command-line flags replayed. Linux also checks flags from `/proc` environ,
+   a deleted binary (`unknown`), an embedded `libjvm.so` (`embed-jvm.c`), and
+   a Docker-container JVM via `nsenter`, both as root and as non-root.
+4. Default full-host runs must exit with a code that matches the last line.
+   On Linux these runs have SIGPIPE ignored, and any `Broken pipe` output
+   fails the test.
+
+Runner CPUs vary between runs: AMD EPYC 7763 (Zen 3, no AVX-512) or
+EPYC 9V74/9V45 (Zen 4, AVX-512 VBMI). On Zen 4, the real Temurin 17/21/25
+JDKs report `impacted`. Not covered by CI: macOS, bash 3.2, Procrun
+services on Windows.
