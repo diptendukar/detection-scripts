@@ -137,7 +137,7 @@ gj() {
     local p=$1 code
     shift
     [ "$VERBOSE" -eq 1 ] && printf 'gcloud: %s --project %s\n' "$*" "$p" >&2
-    if gcloud "$@" --project "$p" --format=json --quiet 2>"$TMP/err"; then
+    if gcloud "$@" ${p:+--project "$p"} --format=json --quiet 2>"$TMP/err"; then
         return 0
     fi
     if grep -qE 'SERVICE_DISABLED|has not been used in project|it is disabled|is not enabled' "$TMP/err"; then
@@ -145,9 +145,9 @@ gj() {
     elif grep -q 'does not contain an App Engine application' "$TMP/err"; then
         code=NO_APP
     else
-        code=$(grep -oE 'PERMISSION_DENIED|UNAUTHENTICATED|NOT_FOUND|FAILED_PRECONDITION|INVALID_ARGUMENT|RESOURCE_EXHAUSTED|UNAVAILABLE|Reauthentication required|refreshing your current auth tokens' \
+        code=$(grep -oE 'PERMISSION_DENIED|UNAUTHENTICATED|NOT_FOUND|FAILED_PRECONDITION|INVALID_ARGUMENT|RESOURCE_EXHAUSTED|UNAVAILABLE|Reauthentication required|refreshing your current auth tokens|do not currently have an active account' \
             "$TMP/err" | head -1)
-        case "$code" in Reauth*|refreshing*) code=UNAUTHENTICATED ;; esac
+        case "$code" in Reauth*|refreshing*|*"active account") code=UNAUTHENTICATED ;; esac
         [ -n "$code" ] || code=$(grep -v '^ *$' "$TMP/err" | head -1 | sed 's/^ERROR: //' | cut -c1-120)
         [ -n "$code" ] || code="failed"
     fi
@@ -840,12 +840,16 @@ EOF
 header
 
 if [ -z "$(printf '%s' "$PROJECTS" | tr -d ' ')" ]; then
-    if out=$(gcloud projects list --filter=lifecycleState:ACTIVE --format=json --quiet 2>"$TMP/err"); then
+    if out=$(gj "" projects list --filter=lifecycleState:ACTIVE); then
         PROJECTS=$(jq -r '.[].projectId' <<<"$out" | sort | tr '\n' ' ')
     else
+        if [ "$(err_code)" = UNAUTHENTICATED ]; then
+            say "error: gcloud is not logged in (run: gcloud auth login)"
+            echo "unknown"; exit 2
+        fi
         PROJECTS=$(gcloud config get-value project 2>/dev/null)
         [ -n "$PROJECTS" ] || {
-            say "error: cannot list projects and no default project set; pass -p"
+            say "error: cannot list projects ($(err_code)) and no default project set; pass -p"
             echo "unknown"; exit 2
         }
     fi

@@ -254,7 +254,10 @@ echo "ERROR: (gcloud.projects.list) PERMISSION_DENIED" > "$F/projects.list.err"
 run env FAKE_GCLOUD_PROJECT=demo-a bash "$S" -s functions
 check "project listing denied -> default project" 2 "projects: demo-a"
 run env FAKE_GCLOUD_PROJECT= bash "$S"
-check "no projects visible -> unknown" 2 "error: cannot list projects and no default project set; pass -p"
+check "no projects visible -> unknown" 2 "error: cannot list projects (PERMISSION_DENIED) and no default project set; pass -p"
+echo "ERROR: (gcloud.projects.list) You do not currently have an active account selected." > "$F/projects.list.err"
+run bash "$S"
+check "not logged in -> unknown" 2 "error: gcloud is not logged in (run: gcloud auth login)"
 rm -f "$F/projects.list.err"
 mv "$F/projects.list.off" "$F/projects.list.json"
 
