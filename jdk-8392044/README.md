@@ -9,6 +9,7 @@ the destination buffer.
 | `detect-jdk-8392044.sh` | Linux, macOS; bash 3.2+ |
 | `Detect-Jdk8392044.ps1` | Windows; PowerShell 5.1 and 7 |
 | `detect-jdk-8392044-aws.sh` | AWS control plane (Lambda, ECS/Fargate, EC2, Beanstalk, EMR); aws CLI v2 + jq |
+| `detect-jdk-8392044-gcp.sh` | GCP control plane (Cloud Run, Cloud Run functions, App Engine, Compute Engine); gcloud + jq |
 
 ## What counts as impacted
 
@@ -194,20 +195,63 @@ For anything left at `[?]`, run the host script on the instance, e.g. through
 SSM Run Command or ECS Exec. Not covered: EKS (use the host script as a
 DaemonSet), App Runner, Glue, Managed Flink, EMR Serverless.
 
+## Google Cloud managed runtimes
+
+`detect-jdk-8392044-gcp.sh` is the GCP counterpart, with the same output,
+markers and exit codes. It runs gcloud with prompts disabled, so it never
+offers to enable an API.
+
+```sh
+./detect-jdk-8392044-gcp.sh                       # every project gcloud can list
+./detect-jdk-8392044-gcp.sh -p my-project -s run,functions -q
+```
+
+| Service | Read from | Not visible |
+|---|---|---|
+| Cloud Run services and jobs | image, managed Java base image, env, command/args | CPU (`[?]`), image `ENV`, secret values |
+| Cloud Run functions (gen1, gen2) | runtime, env | CPU (`[?]`), secret values |
+| App Engine (serving versions) | runtime, `envVariables`, entrypoint | CPU (`[?]`) |
+| Compute Engine | actual CPU platform per VM, Java packages from OS Config inventory, JVM flags in startup scripts, GKE/Dataproc cluster labels | per-process flags, pods on GKE nodes |
+
+Google's Java launchers do not limit the JIT the way Lambda's bootstrap does.
+Cloud Run functions and source deploys run `java -jar`, and App Engine adds
+only heap and GC flags (checked 2026-11-17 against
+`GoogleCloudPlatform/buildpacks` and the `serverless-runtimes` java21 image).
+A Java 17+ workload on GCP therefore has the intrinsic in use unless a flag
+turns it off, and only the CPU decides. Compute Engine reports each VM's CPU
+platform, so `avx-512` there is exact rather than a family guess. Projects or
+APIs that are not in use are listed as "not in use"; permission errors are
+`[?]`.
+
+Permissions (all read-only): `resourcemanager.projects.list`,
+`run.services.list`, `run.jobs.list`, `cloudfunctions.functions.list`,
+`appengine.versions.list`, `appengine.versions.get`,
+`compute.instances.list`, `osconfig.inventories.list`. `roles/viewer` on the
+projects covers most of them. Cloud Run, functions and App Engine listings
+return environment values, and Compute Engine listings return startup
+scripts, which can include secrets. The script keeps only the allowed JVM
+flags.
+
+Not covered: GKE workloads (run the host script as a DaemonSet), Dataproc
+Serverless, Dataflow, Cloud Run worker pools.
+
 ## Testing
 
 CI runs on every change under `jdk-8392044/`:
 
 - `jdk-8392044-windows.yml`: `tests/Run-Tests.ps1` under Windows PowerShell
   5.1 and PowerShell 7 on `windows-latest`.
-- `jdk-8392044-linux.yml`: shellcheck, then `tests/run-tests.sh` and
-  `tests/run-aws-tests.sh` on `ubuntu-latest` and `ubuntu-22.04`.
+- `jdk-8392044-linux.yml`: shellcheck, then `tests/run-tests.sh`,
+  `tests/run-aws-tests.sh` and `tests/run-gcp-tests.sh` on `ubuntu-latest`
+  and `ubuntu-22.04`.
 
 `run-aws-tests.sh` runs the AWS script against `tests/fake-aws`, which
 serves fixtures for each Lambda init mode and flag source, ECS on Fargate,
 EC2 and ARM64, EC2 inventory and gzip user data, Beanstalk and EMR. It also
 checks that no secret value appears in the output and that only read-only
-APIs are called. It needs no AWS account.
+APIs are called. It needs no AWS account. `run-gcp-tests.sh` does the same for GCP with
+`tests/fake-gcloud`, which also fails any call made with prompts enabled. It
+also checks that the AWS and GCP scripts' decision functions are identical.
 
 Both harnesses use the same four layers:
 

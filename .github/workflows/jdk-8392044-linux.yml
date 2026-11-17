@@ -31,6 +31,7 @@ jobs:
           shellcheck -S warning
           jdk-8392044/detect-jdk-8392044.sh jdk-8392044/tests/run-tests.sh jdk-8392044/tests/fake-java
           jdk-8392044/detect-jdk-8392044-aws.sh jdk-8392044/tests/run-aws-tests.sh jdk-8392044/tests/fake-aws
+          jdk-8392044/detect-jdk-8392044-gcp.sh jdk-8392044/tests/run-gcp-tests.sh jdk-8392044/tests/fake-gcloud
 
   test:
     name: bash on ${{ matrix.os }}
@@ -60,3 +61,7 @@ jobs:
       # AWS detector against tests/fake-aws fixtures; no AWS credentials.
       - name: Run AWS detector tests
         run: ./jdk-8392044/tests/run-aws-tests.sh
+
+      # GCP detector against tests/fake-gcloud fixtures; no GCP credentials.
+      - name: Run GCP detector tests
+        run: ./jdk-8392044/tests/run-gcp-tests.sh
