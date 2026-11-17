@@ -119,23 +119,42 @@ N_OK=0
 say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
 dbg() { [ "$VERBOSE" -eq 1 ] && printf 'debug: %s\n' "$*" >&2; return 0; }
 
-report() {
-    local status=$1
-    shift
-    case "$status" in
-        impacted) N_IMPACTED=$((N_IMPACTED + 1)); say "[IMPACTED] $*" ;;
-        unknown)  N_UNKNOWN=$((N_UNKNOWN + 1));   say "[UNKNOWN]  $*" ;;
-        *)        N_OK=$((N_OK + 1));             say "[ok]       $*" ;;
+tally() {
+    case "$1" in
+        impacted) N_IMPACTED=$((N_IMPACTED + 1)) ;;
+        unknown)  N_UNKNOWN=$((N_UNKNOWN + 1)) ;;
+        *)        N_OK=$((N_OK + 1)) ;;
     esac
+}
+
+# One test line: name, value, state.
+line() { say "  $1: $2 [$3]"; }
+
+# A JVM that could not be probed: title, test name, value, state.
+single() {
+    say ""
+    say "$1"
+    line "$2" "$3" "$4"
+    say "  => [$4]"
+    tally "$4"
+}
+
+header() {
+    say "JDK-8392044 check: HotSpot x86-64 AVX-512 Base64 decode heap overwrite"
+    say "states: [impacted] condition met | [ok] condition not met, JVM safe | [unknown] could not check | [n/a] not checked"
+    say "tests:  arch, vm, java version, avx-512, base64 intrinsic. A JVM is impacted only if all five are [impacted]."
 }
 
 finish() {
     if [ "$N_IMPACTED" -gt 0 ]; then
+        say ""
         echo "impacted"; exit 1
     elif [ "$N_UNKNOWN" -gt 0 ]; then
+        say ""
         echo "unknown"; exit 2
     fi
-    [ "$N_OK" -eq 0 ] && say "no JVMs found"
+    [ "$N_OK" -eq 0 ] && { say ""; say "no JVMs found"; }
+    say ""
     echo "not impacted"; exit 0
 }
 
@@ -144,9 +163,10 @@ HOST_ARCH=$(uname -m)
 IS_ROOT=0
 [ "$(id -u)" = 0 ] && IS_ROOT=1
 
+header
 case "$HOST_ARCH" in
-    x86_64|amd64|AMD64) ;;
-    *) say "host architecture is $HOST_ARCH, not x86-64"; echo "not impacted"; exit 0 ;;
+    x86_64|amd64|AMD64) say "host:   $HOST_OS $HOST_ARCH" ;;
+    *) say "host:   $HOST_OS $HOST_ARCH [ok], not x86-64"; say ""; echo "not impacted"; exit 0 ;;
 esac
 
 # AVX-512 VBMI + BW as the OS reports them: yes, no or unknown. Used only when
@@ -213,12 +233,14 @@ flagval() {
     awk -v n="$2" '$2 == n { v = $4; if (v ~ /^\{/) v = ""; print v; exit }' <<<"$1"
 }
 
-# probe LABEL PREFIX JAVA FLAGS NOTE
+# probe TITLE PREFIX JAVA FLAGS
+#   TITLE:  how the JVM is shown, e.g. "/usr/bin/java (pid 12, container)"
 #   PREFIX: command prefix such as "nsenter -t PID --mount --root", or empty
 #   FLAGS:  space separated options from filter_flags
 probe() {
-    local label=$1 prefix=$2 java=$3 flags=$4 note=$5
-    local h o1 o2 ver vm arch k desc useavx b64 comp tiered stop dis cpuline vbmi
+    local title=$1 prefix=$2 java=$3 flags=$4
+    local h o1 o2 ver vm arch k useavx b64 comp tiered stop dis cpuline vbmi result
+    local s_arch s_vm s_ver v_ver s_avx v_avx s_b64 v_b64
 
     h=$(printf '%s|%s|%s' "$prefix" "$java" "$flags" | cksum | tr -c '0-9\n' _)
     if [ -f "$TMP/$h.1" ]; then
@@ -234,79 +256,95 @@ probe() {
     vm=$(prop "$o1" java.vm.name)
     arch=$(prop "$o1" os.arch)
     if [ -z "$ver" ]; then
-        report unknown "$label $java$note: could not run it: $(head -1 <<<"$o1")"
+        single "$title" "run" "$(head -1 <<<"$o1")" unknown
         return
     fi
-    desc="$label $java ($ver, $vm)$note"
 
-    case "$vm" in
-        *OpenJ9*|*J9*) report ok "$desc: not HotSpot"; return ;;
-    esac
-    case "$arch" in
-        amd64|x86_64) ;;
-        *) report ok "$desc: os.arch=$arch"; return ;;
-    esac
+    s_arch=impacted
+    case "$arch" in amd64|x86_64) ;; *) s_arch=ok ;; esac
+    s_vm=impacted
+    case "$vm" in *OpenJ9*|*J9*) s_vm=ok ;; esac
+    s_ver=impacted
+    v_ver=$ver
     k=$(ver_key "$ver")
     if [ "$k" -lt "$MIN_KEY" ]; then
-        report ok "$desc: older than 17.0.6"; return
-    fi
-    if is_fixed "$ver"; then
-        report ok "$desc: fixed version"; return
-    fi
-
-    if [ -f "$TMP/$h.2" ]; then
-        o2=$(cat "$TMP/$h.2")
-    else
-        # shellcheck disable=SC2086
-        o2=$(env -u JAVA_TOOL_OPTIONS -u _JAVA_OPTIONS -u JDK_JAVA_OPTIONS \
-            $TO $prefix "$java" -XX:+IgnoreUnrecognizedVMOptions -XX:+UnlockDiagnosticVMOptions \
-            $flags -Xlog:os+cpu=info -XX:+PrintFlagsFinal -version 2>&1 </dev/null)
-        printf '%s\n' "$o2" > "$TMP/$h.2"
+        s_ver=ok; v_ver="$ver (< 17.0.6)"
+    elif is_fixed "$ver"; then
+        s_ver=ok; v_ver="$ver (fixed)"
     fi
 
-    useavx=$(flagval "$o2" UseAVX)
-    b64=$(flagval "$o2" UseBASE64Intrinsics)
-    comp=$(flagval "$o2" UseCompiler)
-    tiered=$(flagval "$o2" TieredCompilation)
-    stop=$(flagval "$o2" TieredStopAtLevel)
-    dis=$(flagval "$o2" DisableIntrinsic)
-    dbg "$java flags[$flags] UseAVX=$useavx b64=$b64 comp=$comp tiered=$tiered stop=$stop dis=$dis"
+    s_avx=n/a; v_avx=-
+    s_b64=n/a; v_b64=-
+    if [ "$s_arch$s_vm$s_ver" = impactedimpactedimpacted ]; then
+        if [ -f "$TMP/$h.2" ]; then
+            o2=$(cat "$TMP/$h.2")
+        else
+            # shellcheck disable=SC2086
+            o2=$(env -u JAVA_TOOL_OPTIONS -u _JAVA_OPTIONS -u JDK_JAVA_OPTIONS \
+                $TO $prefix "$java" -XX:+IgnoreUnrecognizedVMOptions -XX:+UnlockDiagnosticVMOptions \
+                $flags -Xlog:os+cpu=info -XX:+PrintFlagsFinal -version 2>&1 </dev/null)
+            printf '%s\n' "$o2" > "$TMP/$h.2"
+        fi
 
-    case "$useavx" in
-        ''|*[!0-9]*) report unknown "$desc: could not read VM flags"; return ;;
-    esac
-    if [ "$useavx" -lt 3 ]; then
-        report ok "$desc: UseAVX=$useavx, AVX-512 stub not generated"; return
-    fi
+        useavx=$(flagval "$o2" UseAVX)
+        b64=$(flagval "$o2" UseBASE64Intrinsics)
+        comp=$(flagval "$o2" UseCompiler)
+        tiered=$(flagval "$o2" TieredCompilation)
+        stop=$(flagval "$o2" TieredStopAtLevel)
+        dis=$(flagval "$o2" DisableIntrinsic)
+        dbg "$java flags[$flags] UseAVX=$useavx b64=$b64 comp=$comp tiered=$tiered stop=$stop dis=$dis"
 
-    cpuline=$(grep -m1 'os,cpu.*CPU:' <<<"$o2" | sed 's/^.*CPU://')
-    if [ -n "$cpuline" ]; then
-        vbmi=$(has_vbmi_bw "$cpuline")
-    else
-        vbmi=$HOST_CPU
-        dbg "$java did not log CPU features; using OS view ($HOST_CPU)"
-    fi
-    case "$vbmi" in
-        no) report ok "$desc: no AVX-512 VBMI/BW visible to the JVM"; return ;;
-        unknown) report unknown "$desc: could not determine AVX-512 VBMI support"; return ;;
-    esac
-
-    if [ "$b64" = false ]; then
-        report ok "$desc: mitigated, -XX:-UseBASE64Intrinsics"; return
-    fi
-    case "$dis" in
-        *_base64_decodeBlock*) report ok "$desc: mitigated, DisableIntrinsic=$dis"; return ;;
-    esac
-    if [ "$comp" = false ]; then
-        report ok "$desc: interpreter only"; return
-    fi
-    if [ "$tiered" = true ]; then
-        case "$stop" in
-            [0-3]) report ok "$desc: TieredStopAtLevel=$stop, no top-tier JIT"; return ;;
+        case "$useavx" in
+            ''|*[!0-9]*)
+                s_avx=unknown; v_avx="VM flags unreadable"
+                s_b64=unknown; v_b64="VM flags unreadable" ;;
+            *)
+                if [ "$useavx" -lt 3 ]; then
+                    s_avx=ok; v_avx="UseAVX=$useavx"
+                else
+                    cpuline=$(grep -m1 'os,cpu.*CPU:' <<<"$o2" | sed 's/^.*CPU://')
+                    if [ -n "$cpuline" ]; then
+                        vbmi=$(has_vbmi_bw "$cpuline")
+                    else
+                        vbmi=$HOST_CPU
+                        dbg "$java did not log CPU features; using OS view ($HOST_CPU)"
+                    fi
+                    case "$vbmi" in
+                        yes) s_avx=impacted; v_avx="vbmi+bw, UseAVX=$useavx" ;;
+                        no) s_avx=ok; v_avx="no vbmi/bw" ;;
+                        *) s_avx=unknown; v_avx="CPU features unreadable" ;;
+                    esac
+                fi
+                s_b64=impacted; v_b64=on
+                if [ "$b64" = false ]; then
+                    s_b64=ok; v_b64="off (-XX:-UseBASE64Intrinsics)"
+                elif [ -n "$dis" ] && [ "${dis#*_base64_decodeBlock}" != "$dis" ]; then
+                    s_b64=ok; v_b64="off (DisableIntrinsic=$dis)"
+                elif [ "$comp" = false ]; then
+                    s_b64=ok; v_b64="unused (-Xint)"
+                elif [ "$tiered" = true ]; then
+                    case "$stop" in
+                        [0-3]) s_b64=ok; v_b64="unused (TieredStopAtLevel=$stop)" ;;
+                    esac
+                fi ;;
         esac
     fi
 
-    report impacted "$desc: AVX-512 Base64 decode stub active (UseAVX=$useavx)"
+    case " $s_arch $s_vm $s_ver $s_avx $s_b64 " in
+        *" ok "*) result=ok ;;
+        *" unknown "*) result=unknown ;;
+        *) result=impacted ;;
+    esac
+
+    say ""
+    say "$title"
+    line "arch" "$arch" "$s_arch"
+    line "vm" "$vm" "$s_vm"
+    line "java version" "$v_ver" "$s_ver"
+    line "avx-512" "$v_avx" "$s_avx"
+    line "base64 intrinsic" "$v_b64" "$s_b64"
+    say "  => [$result]"
+    tally "$result"
 }
 
 resolve() {
@@ -348,7 +386,7 @@ proc_line() { printf '%s%s%s%s%s%s%s%s%s\n' "$1" "$SEP" "$2" "$SEP" "$3" "$SEP" 
 
 flagfile_note() {
     if grep -qE '^-XX:(Flags|VMOptionsFile)=|^@' ; then
-        printf ' [flags file or @argfile not parsed]'
+        printf ', flags file not parsed'
     fi
 }
 
@@ -368,19 +406,19 @@ scan_procs_linux() {
                 java=$exe ;;
             "")
                 case "$argv0" in
-                    /*/java) java=$argv0; note=" [exe unreadable, used argv[0]]" ;;
-                    java|*/java) report unknown "pid $pid ($argv0): cannot resolve its java binary; run as root"; continue ;;
+                    /*/java) java=$argv0; note=", exe unreadable, used argv[0]" ;;
+                    java|*/java) single "$argv0 (pid $pid)" "binary" "path unreadable, run as root" unknown; continue ;;
                     *) continue ;;
                 esac ;;
             *)
                 lib=$(grep -m1 -o '/[^ ]*/libjvm\.so' "$d/maps" 2>/dev/null) || continue
                 [ -n "$lib" ] || continue
                 java="${lib%/lib/*/libjvm.so}/bin/java"
-                note=" [JVM embedded in $exe]" ;;
+                note=", embedded in $exe" ;;
         esac
         case "$java" in
             *" (deleted)")
-                report unknown "pid $pid: running JVM ${java% (deleted)} was replaced on disk after start; restart it or check the old version"
+                single "${java% (deleted)} (pid $pid)" "binary" "replaced on disk after start, restart it" unknown
                 continue ;;
         esac
 
@@ -400,9 +438,9 @@ scan_procs_linux() {
         if [ -n "$ns" ] && [ -n "$self_ns" ] && [ "$ns" != "$self_ns" ]; then
             if [ "$IS_ROOT" -eq 1 ] && command -v nsenter >/dev/null 2>&1; then
                 prefix="nsenter -t $pid --mount --root"
-                note="$note [container]"
+                note="$note, container"
             else
-                report unknown "pid $pid $java: JVM in a container; run as root with nsenter available"
+                single "$java (pid $pid, container)" "binary" "in a container, run as root with nsenter" unknown
                 continue
             fi
         fi
@@ -445,24 +483,24 @@ if [ "$SCAN_PROCS" -eq 1 ]; then
     case "$HOST_OS" in
         Linux)  scan_procs_linux ;;
         Darwin) scan_procs_darwin ;;
-        *)      say "process scan not supported on $HOST_OS" ;;
+        *)      say "note:   process scan not supported on $HOST_OS" ;;
     esac
-    [ "$IS_ROOT" -eq 1 ] || say "note: not root; other users' processes and containers may be missed"
+    [ "$IS_ROOT" -eq 1 ] || say "note:   not root; other users' processes and containers may be missed"
 fi
 
 while IFS= read -r j; do
     case "$j" in
-        missing:*) report unknown "${j#missing:}: not an executable file"; continue ;;
+        missing:*) single "${j#missing:} (-j)" "binary" "not an executable file" unknown; continue ;;
     esac
-    probe "installed" "" "$j" "$DISK_FLAGS" ""
+    probe "$j (installed)" "" "$j" "$DISK_FLAGS"
 done < "$TMP/cands"
 
 while IFS="$SEP" read -r pid prefix java flags note; do
     if [ "$pid" = gone ]; then
-        report unknown "pid $prefix: binary no longer on disk; restart it or check the old version"
+        single "${prefix#* } (pid ${prefix%% *})" "binary" "no longer on disk, restart it" unknown
         continue
     fi
-    probe "pid $pid" "$prefix" "$java" "$flags" "$note"
+    probe "$java (pid $pid$note)" "$prefix" "$java" "$flags"
 done < "$TMP/procs"
 
 finish

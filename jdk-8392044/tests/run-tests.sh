@@ -113,35 +113,40 @@ echo
 echo "## Decision logic (fake java)"
 F=(bash "$S" --no-procs --no-disk -j "$FAKE")
 
-run "${F[@]}";                                         check "default fake 17.0.9 -> impacted" 1 "AVX-512 Base64 decode stub active"
+run "${F[@]}";                                         check "default fake 17.0.9 -> impacted" 1 "base64 intrinsic: on [impacted]" "  => [impacted]"
 run "${F[@]}" -q;                                      check "quiet prints verdict only" 1
 [ "$(printf '%s\n' "$OUT" | wc -l)" -eq 1 ] || { FAIL=$((FAIL + 1)); echo "FAIL  quiet printed more than one line"; }
+run "${F[@]}"; check "output has header, tests and per-test states" 1 \
+    "states: [impacted] condition met" "tests:  arch, vm, java version, avx-512, base64 intrinsic" \
+    "  arch: amd64 [impacted]" "  vm: OpenJDK 64-Bit Server VM [impacted]" "  java version: 17.0.9 [impacted]" \
+    "  avx-512: vbmi+bw, UseAVX=3 [impacted]" "  base64 intrinsic: on [impacted]" "  => [impacted]"
+run env FAKE_VER=17.0.5 "${F[@]}"; check "later tests not checked once ruled out" 0 "  avx-512: - [n/a]" "  base64 intrinsic: - [n/a]" "  => [ok]"
 run env FAKE_VER=17.0.6 "${F[@]}";                     check "17.0.6 boundary -> impacted" 1
-run env FAKE_VER=17.0.5 "${F[@]}";                     check "17.0.5 -> ok" 0 "older than 17.0.6"
-run env FAKE_VER=1.8.0_392 "${F[@]}";                  check "1.8.0_392 -> ok" 0 "older than 17.0.6"
+run env FAKE_VER=17.0.5 "${F[@]}";                     check "17.0.5 -> ok" 0 "(< 17.0.6) [ok]"
+run env FAKE_VER=1.8.0_392 "${F[@]}";                  check "1.8.0_392 -> ok" 0 "(< 17.0.6) [ok]"
 run env FAKE_VER=27.0.1.0.3 "${F[@]}";                 check "27.0.1.0.3 no fix list -> impacted" 1
-run env FAKE_VER=21.0.11 JDK8392044_FIXED_IN="17.0.19 21.0.11" "${F[@]}"; check "fixed via env" 0 "fixed version"
+run env FAKE_VER=21.0.11 JDK8392044_FIXED_IN="17.0.19 21.0.11" "${F[@]}"; check "fixed via env" 0 "(fixed) [ok]"
 run env FAKE_VER=21.0.10 JDK8392044_FIXED_IN="17.0.19 21.0.11" "${F[@]}"; check "below fix via env" 1
-run env FAKE_VER=27.0.1 JDK8392044_FIXED_IN="17.0.19 25.0.3" "${F[@]}";   check "later major than top fix" 0 "fixed version"
-run env FAKE_FEATURES="avx512f, avx512bw, avx512_vbmi2" "${F[@]}"; check "vbmi2 without vbmi -> ok" 0 "no AVX-512 VBMI/BW"
-run env FAKE_FEATURES="avx512f, avx512_vbmi" "${F[@]}";            check "vbmi without bw -> ok" 0 "no AVX-512 VBMI/BW"
-run env FAKE_VM="Eclipse OpenJ9 VM" "${F[@]}";         check "OpenJ9 -> ok" 0 "not HotSpot"
-run env FAKE_ARCH=aarch64 "${F[@]}";                   check "aarch64 JVM -> ok" 0 "os.arch=aarch64"
-run env FAKE_ARCH=i386 "${F[@]}";                      check "32-bit JVM -> ok" 0 "os.arch=i386"
+run env FAKE_VER=27.0.1 JDK8392044_FIXED_IN="17.0.19 25.0.3" "${F[@]}";   check "later major than top fix" 0 "(fixed) [ok]"
+run env FAKE_FEATURES="avx512f, avx512bw, avx512_vbmi2" "${F[@]}"; check "vbmi2 without vbmi -> ok" 0 "avx-512: no vbmi/bw [ok]"
+run env FAKE_FEATURES="avx512f, avx512_vbmi" "${F[@]}";            check "vbmi without bw -> ok" 0 "avx-512: no vbmi/bw [ok]"
+run env FAKE_VM="Eclipse OpenJ9 VM" "${F[@]}";         check "OpenJ9 -> ok" 0 "vm: Eclipse OpenJ9 VM [ok]"
+run env FAKE_ARCH=aarch64 "${F[@]}";                   check "aarch64 JVM -> ok" 0 "arch: aarch64 [ok]"
+run env FAKE_ARCH=i386 "${F[@]}";                      check "32-bit JVM -> ok" 0 "arch: i386 [ok]"
 HOST_VBMI=0
 grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512vbmi && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512bw && HOST_VBMI=1
 run env FAKE_NOCPULOG=1 "${F[@]}";                     check "no CPU log falls back to OS view (host VBMI=$HOST_VBMI)" "$HOST_VBMI"
-run "${F[@]}" -o "-XX:UseAVX=2";                       check "-o UseAVX=2" 0 "UseAVX=2"
-run env JDK8392044_JVM_OPTIONS="-XX:UseAVX=2" "${F[@]}"; check "UseAVX=2 via env" 0 "UseAVX=2"
+run "${F[@]}" -o "-XX:UseAVX=2";                       check "-o UseAVX=2" 0 "avx-512: UseAVX=2 [ok]"
+run env JDK8392044_JVM_OPTIONS="-XX:UseAVX=2" "${F[@]}"; check "UseAVX=2 via env" 0 "avx-512: UseAVX=2 [ok]"
 run env JDK8392044_JVM_OPTIONS="-XX:UseAVX=2" "${F[@]}" -o "-XX:UseAVX=3"; check "-o overrides env" 1
 run "${F[@]}" -o "-javaagent:/nope.jar -XX:+UseBASE64Intrinsics"; check "agent option is not replayed" 1
-run "${F[@]}" -o "-XX:-UseBASE64Intrinsics";           check "-UseBASE64Intrinsics" 0 "mitigated"
-run "${F[@]}" -o "-XX:DisableIntrinsic=_base64_decodeBlock"; check "DisableIntrinsic" 0 "mitigated, DisableIntrinsic"
-run "${F[@]}" -o "-Xint";                              check "-Xint" 0 "interpreter only"
-run "${F[@]}" -o "-XX:TieredStopAtLevel=1";            check "TieredStopAtLevel=1" 0 "TieredStopAtLevel=1"
-run env JAVA_TOOL_OPTIONS=-XX:-UseBASE64Intrinsics "${F[@]}"; check "JAVA_TOOL_OPTIONS mitigates" 0 "mitigated"
+run "${F[@]}" -o "-XX:-UseBASE64Intrinsics";           check "-UseBASE64Intrinsics" 0 "base64 intrinsic: off (-XX:-UseBASE64Intrinsics) [ok]"
+run "${F[@]}" -o "-XX:DisableIntrinsic=_base64_decodeBlock"; check "DisableIntrinsic" 0 "off (DisableIntrinsic=_base64_decodeBlock) [ok]"
+run "${F[@]}" -o "-Xint";                              check "-Xint" 0 "unused (-Xint) [ok]"
+run "${F[@]}" -o "-XX:TieredStopAtLevel=1";            check "TieredStopAtLevel=1" 0 "unused (TieredStopAtLevel=1) [ok]"
+run env JAVA_TOOL_OPTIONS=-XX:-UseBASE64Intrinsics "${F[@]}"; check "JAVA_TOOL_OPTIONS mitigates" 0 "base64 intrinsic: off (-XX:-UseBASE64Intrinsics) [ok]"
 run env JAVA_TOOL_OPTIONS=-XX:-UseBASE64Intrinsics _JAVA_OPTIONS=-XX:+UseBASE64Intrinsics "${F[@]}"; check "_JAVA_OPTIONS overrides JAVA_TOOL_OPTIONS" 1
-run bash "$S" --no-procs --no-disk -j /nope/java;      check "missing -j path -> unknown" 2 "not an executable file"
+run bash "$S" --no-procs --no-disk -j /nope/java;      check "missing -j path -> unknown" 2 "binary: not an executable file [unknown]"
 run bash "$S" --bogus;                                 check "bad argument -> 3" 3
 run bash "$S" -j;                                      check "-j without value -> 3" 3
 
@@ -171,24 +176,24 @@ echo "## Running JVMs ($MODERN)"
 P=(bash "$S" --no-disk)
 
 start_paused "$MODERN" -XX:UseAVX=2
-run "${P[@]}"; check "running JVM, command-line UseAVX=2 replayed" 0 "pid $PAUSED_PID " "UseAVX=2, AVX-512 stub not generated"
+run "${P[@]}"; check "running JVM, command-line UseAVX=2 replayed" 0 "(pid $PAUSED_PID)" "avx-512: UseAVX=2 [ok]"
 stop "$PAUSED_PID"
 
 export JAVA_TOOL_OPTIONS=-XX:UseAVX=2
 start_paused "$MODERN"
 unset JAVA_TOOL_OPTIONS
-run "${P[@]}"; check "running JVM, JAVA_TOOL_OPTIONS from /proc environ replayed" 0 "pid $PAUSED_PID " "UseAVX=2"
+run "${P[@]}"; check "running JVM, JAVA_TOOL_OPTIONS from /proc environ replayed" 0 "(pid $PAUSED_PID)" "avx-512: UseAVX=2 [ok]"
 stop "$PAUSED_PID"
 
 start_paused "$MODERN"
-run "${P[@]}"; check "running JVM, default flags" "$MODERN_WANT" "pid $PAUSED_PID "
+run "${P[@]}"; check "running JVM, default flags" "$MODERN_WANT" "(pid $PAUSED_PID)"
 stop "$PAUSED_PID"
 
 # A JDK upgraded under a running JVM: the old binary is gone.
 cp -a "$(dirname "$(dirname "$MODERN")")" "$WORK/jdk-copy"
 start_paused "$WORK/jdk-copy/bin/java"
 rm -rf "$WORK/jdk-copy"
-run "${P[@]}"; check "running JVM whose binary was deleted -> unknown" 2 "pid $PAUSED_PID" "replaced on disk"
+run "${P[@]}"; check "running JVM whose binary was deleted -> unknown" 2 "(pid $PAUSED_PID)" "binary: replaced on disk after start, restart it [unknown]"
 stop "$PAUSED_PID"
 
 # A JVM embedded in a non-java process.
@@ -198,7 +203,7 @@ if cc -o "$WORK/embed-jvm" "$HERE/embed-jvm.c" -ldl 2>"$WORK/cc.err"; then
     EPID=$!
     PIDS="$PIDS $EPID"
     sleep 2
-    run "${P[@]}"; check "embedded libjvm.so found" "$MODERN_WANT" "pid $EPID " "[JVM embedded in $WORK/embed-jvm]"
+    run "${P[@]}"; check "embedded libjvm.so found" "$MODERN_WANT" "(pid $EPID, embedded in $WORK/embed-jvm)"
     stop "$EPID"
 else
     FAIL=$((FAIL + 1)); echo "FAIL  could not build embed-jvm"; sed 's/^/      | /' "$WORK/cc.err"
@@ -217,10 +222,10 @@ if [ -n "$IMAGE" ] && sudo -n true 2>/dev/null && command -v docker >/dev/null; 
         sleep 0.5
     done
     run sudo -n bash "$S" --no-disk
-    check "container JVM probed via nsenter" 0 "pid $CPID " "[container]" "UseAVX=2"
+    check "container JVM probed via nsenter" 0 "(pid $CPID, container)" "avx-512: UseAVX=2 [ok]"
 
     run bash "$S" --no-disk
-    check "container JVM without root -> unknown" 2 "pid $CPID"
+    check "container JVM without root -> unknown" 2 "(pid $CPID" "[unknown]"
     docker rm -f "$CONTAINER" >/dev/null 2>&1
     CONTAINER=""
 else

@@ -86,31 +86,41 @@ Write-Host "Shell under test: $Shell"
 Write-Host "`n## Decision logic (fake java.exe)"
 $F = @('-NoProcesses', '-NoDisk', '-Java', $FakeJava)
 
-Assert-Result 'default fake 17.0.9 -> impacted' (Invoke-Detect $F) 1 'AVX-512 Base64 decode stub active'
+Assert-Result 'default fake 17.0.9 -> impacted' (Invoke-Detect $F) 1 '  => [impacted]'
 Assert-Result 'quiet prints verdict only' (Invoke-Detect ($F + '-Quiet')) 1
+$r = Invoke-Detect $F
+foreach ($want in @('states: [impacted] condition met', 'tests:  arch, vm, java version, avx-512, base64 intrinsic',
+        '  arch: amd64 [impacted]', '  vm: OpenJDK 64-Bit Server VM [impacted]', '  java version: 17.0.9 [impacted]',
+        '  avx-512: vbmi+bw, UseAVX=3 [impacted]', '  base64 intrinsic: on [impacted]')) {
+    Assert-Result "format: '$want'" $r 1 $want
+}
+$r = Invoke-Detect $F @{ FAKE_VER = '17.0.5' }
+Assert-Result 'later tests not checked once ruled out' $r 0 '  avx-512: - [n/a]'
+Assert-Result 'multiple -Java paths in one argument' (Invoke-Detect @('-NoProcesses', '-NoDisk', '-Java', "$FakeJava,C:\nope\java.exe")) 1 'C:\nope\java.exe (-Java)'
 Assert-Result '17.0.6 boundary -> impacted' (Invoke-Detect $F @{ FAKE_VER = '17.0.6' }) 1
-Assert-Result '17.0.5 -> ok' (Invoke-Detect $F @{ FAKE_VER = '17.0.5' }) 0 'older than 17.0.6'
-Assert-Result '1.8.0_392 -> ok' (Invoke-Detect $F @{ FAKE_VER = '1.8.0_392' }) 0 'older than 17.0.6'
+Assert-Result '17.0.5 -> ok' (Invoke-Detect $F @{ FAKE_VER = '17.0.5' }) 0 '(< 17.0.6) [ok]'
+Assert-Result '1.8.0_392 -> ok' (Invoke-Detect $F @{ FAKE_VER = '1.8.0_392' }) 0 '(< 17.0.6) [ok]'
 Assert-Result '27.0.1.0.3 no fix list -> impacted' (Invoke-Detect $F @{ FAKE_VER = '27.0.1.0.3' }) 1
-Assert-Result 'fixed via env' (Invoke-Detect $F @{ FAKE_VER = '21.0.11'; JDK8392044_FIXED_IN = '17.0.19 21.0.11' }) 0 'fixed version'
+Assert-Result 'fixed via env' (Invoke-Detect $F @{ FAKE_VER = '21.0.11'; JDK8392044_FIXED_IN = '17.0.19 21.0.11' }) 0 '(fixed) [ok]'
 Assert-Result 'below fix via env' (Invoke-Detect $F @{ FAKE_VER = '21.0.10'; JDK8392044_FIXED_IN = '17.0.19 21.0.11' }) 1
-Assert-Result 'later major than top fix' (Invoke-Detect ($F + @('-FixedIn', '17.0.19,25.0.3')) @{ FAKE_VER = '27.0.1' }) 0 'fixed version'
-Assert-Result 'vbmi2 without vbmi -> ok' (Invoke-Detect $F @{ FAKE_FEATURES = 'avx512f, avx512bw, avx512_vbmi2' }) 0 'no AVX-512 VBMI/BW'
-Assert-Result 'vbmi without bw -> ok' (Invoke-Detect $F @{ FAKE_FEATURES = 'avx512f, avx512_vbmi' }) 0 'no AVX-512 VBMI/BW'
-Assert-Result 'OpenJ9 -> ok' (Invoke-Detect $F @{ FAKE_VM = 'Eclipse OpenJ9 VM' }) 0 'not HotSpot'
-Assert-Result 'aarch64 JVM -> ok' (Invoke-Detect $F @{ FAKE_ARCH = 'aarch64' }) 0 'os.arch=aarch64'
-Assert-Result 'x86 32-bit JVM -> ok' (Invoke-Detect $F @{ FAKE_ARCH = 'x86' }) 0 'os.arch=x86'
-Assert-Result 'UseAVX=2 (colon form)' (Invoke-Detect ($F + '-JvmOptions:-XX:UseAVX=2')) 0 'UseAVX=2'
-Assert-Result 'UseAVX=2 via env' (Invoke-Detect $F @{ JDK8392044_JVM_OPTIONS = '-XX:UseAVX=2' }) 0 'UseAVX=2'
+Assert-Result 'comma -FixedIn list is split' (Invoke-Detect ($F + @('-FixedIn', '17.0.19,21.0.11')) @{ FAKE_VER = '21.0.10' }) 1
+Assert-Result 'later major than top fix' (Invoke-Detect ($F + @('-FixedIn', '17.0.19,25.0.3')) @{ FAKE_VER = '27.0.1' }) 0 '(fixed) [ok]'
+Assert-Result 'vbmi2 without vbmi -> ok' (Invoke-Detect $F @{ FAKE_FEATURES = 'avx512f, avx512bw, avx512_vbmi2' }) 0 'avx-512: no vbmi/bw [ok]'
+Assert-Result 'vbmi without bw -> ok' (Invoke-Detect $F @{ FAKE_FEATURES = 'avx512f, avx512_vbmi' }) 0 'avx-512: no vbmi/bw [ok]'
+Assert-Result 'OpenJ9 -> ok' (Invoke-Detect $F @{ FAKE_VM = 'Eclipse OpenJ9 VM' }) 0 'vm: Eclipse OpenJ9 VM [ok]'
+Assert-Result 'aarch64 JVM -> ok' (Invoke-Detect $F @{ FAKE_ARCH = 'aarch64' }) 0 'arch: aarch64 [ok]'
+Assert-Result 'x86 32-bit JVM -> ok' (Invoke-Detect $F @{ FAKE_ARCH = 'x86' }) 0 'arch: x86 [ok]'
+Assert-Result 'UseAVX=2 (colon form)' (Invoke-Detect ($F + '-JvmOptions:-XX:UseAVX=2')) 0 'avx-512: UseAVX=2 [ok]'
+Assert-Result 'UseAVX=2 via env' (Invoke-Detect $F @{ JDK8392044_JVM_OPTIONS = '-XX:UseAVX=2' }) 0 'avx-512: UseAVX=2 [ok]'
 Assert-Result 'agent option is not replayed' (Invoke-Detect ($F + '-JvmOptions:-javaagent:C:\nope.jar')) 1
-Assert-Result '-UseBASE64Intrinsics' (Invoke-Detect ($F + '-JvmOptions:-XX:-UseBASE64Intrinsics')) 0 'mitigated'
-Assert-Result 'DisableIntrinsic' (Invoke-Detect ($F + '-JvmOptions:-XX:DisableIntrinsic=_base64_decodeBlock')) 0 'mitigated, DisableIntrinsic'
-Assert-Result '-Xint' (Invoke-Detect ($F + '-JvmOptions:-Xint')) 0 'interpreter only'
-Assert-Result 'TieredStopAtLevel=1' (Invoke-Detect ($F + '-JvmOptions:-XX:TieredStopAtLevel=1')) 0 'TieredStopAtLevel=1'
-Assert-Result 'JAVA_TOOL_OPTIONS mitigates' (Invoke-Detect $F @{ JAVA_TOOL_OPTIONS = '-XX:-UseBASE64Intrinsics' }) 0 'mitigated'
+Assert-Result '-UseBASE64Intrinsics' (Invoke-Detect ($F + '-JvmOptions:-XX:-UseBASE64Intrinsics')) 0 'base64 intrinsic: off (-XX:-UseBASE64Intrinsics) [ok]'
+Assert-Result 'DisableIntrinsic' (Invoke-Detect ($F + '-JvmOptions:-XX:DisableIntrinsic=_base64_decodeBlock')) 0 'off (DisableIntrinsic=_base64_decodeBlock) [ok]'
+Assert-Result '-Xint' (Invoke-Detect ($F + '-JvmOptions:-Xint')) 0 'unused (-Xint) [ok]'
+Assert-Result 'TieredStopAtLevel=1' (Invoke-Detect ($F + '-JvmOptions:-XX:TieredStopAtLevel=1')) 0 'unused (TieredStopAtLevel=1) [ok]'
+Assert-Result 'JAVA_TOOL_OPTIONS mitigates' (Invoke-Detect $F @{ JAVA_TOOL_OPTIONS = '-XX:-UseBASE64Intrinsics' }) 0 'base64 intrinsic: off (-XX:-UseBASE64Intrinsics) [ok]'
 Assert-Result '_JAVA_OPTIONS overrides JAVA_TOOL_OPTIONS' (Invoke-Detect $F @{
         JAVA_TOOL_OPTIONS = '-XX:-UseBASE64Intrinsics'; _JAVA_OPTIONS = '-XX:+UseBASE64Intrinsics' }) 1
-Assert-Result 'missing -Java path -> unknown' (Invoke-Detect @('-NoProcesses', '-NoDisk', '-Java', 'C:\nope\java.exe')) 2 'not a file'
+Assert-Result 'missing -Java path -> unknown' (Invoke-Detect @('-NoProcesses', '-NoDisk', '-Java', 'C:\nope\java.exe')) 2 'binary: not a file [unknown]'
 
 # --- 2. Real JDKs on the runner --------------------------------------------------
 
@@ -149,14 +159,14 @@ if ($modern) {
 
     $p = Start-PausedJvm $modern @('-XX:UseAVX=2')
     try {
-        Assert-Result 'running JVM, command-line UseAVX=2 replayed' (Invoke-Detect @('-NoDisk')) 0 "pid $($p.Id) "
-        Assert-Result 'running JVM reason names UseAVX=2' (Invoke-Detect @('-NoDisk')) 0 'UseAVX=2, AVX-512 stub not generated'
+        Assert-Result 'running JVM, command-line UseAVX=2 replayed' (Invoke-Detect @('-NoDisk')) 0 "(pid $($p.Id))"
+        Assert-Result 'running JVM reason names UseAVX=2' (Invoke-Detect @('-NoDisk')) 0 'avx-512: UseAVX=2 [ok]'
     } finally { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
 
     $p = Start-PausedJvm $modern @()
     try {
         $want = if ($modernFacts.Impacted) { 1 } else { 0 }
-        Assert-Result 'running JVM, default flags' (Invoke-Detect @('-NoDisk')) $want "pid $($p.Id) "
+        Assert-Result 'running JVM, default flags' (Invoke-Detect @('-NoDisk')) $want "(pid $($p.Id))"
     } finally { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
 } else {
     $script:Failures++
