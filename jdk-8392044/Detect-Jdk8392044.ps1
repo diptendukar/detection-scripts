@@ -322,14 +322,20 @@ function Invoke-Probe([string]$Title, [string]$JavaExe, [string[]]$Flags) {
     }
 
     $sArch = if ($arch -in @('amd64', 'x86_64')) { 'impacted' } else { 'ok' }
-    $sVm = if ($vm -match 'J9') { 'ok' } else { 'impacted' }
+    # Only HotSpot generates the stub. OpenJ9 and GCJ do not; Azul Prime
+    # (Zing) replaces C2 and is not verified; anything unrecognized is [?].
+    $vVm = $vm
+    if ($vm -match 'J9|libgcj|GNU') { $sVm = 'ok' }
+    elseif ($vm -match 'Zing|Prime') { $sVm = 'unknown'; $vVm = "$vm (not HotSpot C2)" }
+    elseif ($vm -match 'HotSpot|Server VM|Client VM') { $sVm = 'impacted' }
+    else { $sVm = 'unknown'; $vVm = "$vm (not recognized as HotSpot)" }
     $sVer = 'impacted'; $vVer = $ver
     if ((Get-VerKey $ver) -lt $MinKey) { $sVer = 'ok'; $vVer = "$ver (< 17.0.6)" }
     elseif (Test-Fixed $ver) { $sVer = 'ok'; $vVer = "$ver (fixed)" }
 
     $sAvx = 'n/a'; $vAvx = '-'
     $sB64 = 'n/a'; $vB64 = '-'
-    if ($sArch -eq 'impacted' -and $sVm -eq 'impacted' -and $sVer -eq 'impacted') {
+    if ($sArch -ne 'ok' -and $sVm -ne 'ok' -and $sVer -ne 'ok') {
         if (-not $script:Cache.ContainsKey($key + '|2')) {
             $probeArgs = @('-XX:+IgnoreUnrecognizedVMOptions', '-XX:+UnlockDiagnosticVMOptions') +
                 $Flags + @('-Xlog:os+cpu=info', '-XX:+PrintFlagsFinal', '-version')
@@ -379,7 +385,7 @@ function Invoke-Probe([string]$Title, [string]$JavaExe, [string[]]$Flags) {
     Say ''
     Say $Title
     Line 'arch' $arch $sArch
-    Line 'vm' $vm $sVm
+    Line 'vm' $vVm $sVm
     Line 'java version' $vVer $sVer
     Line 'avx-512' $vAvx $sAvx
     Line 'base64 intrinsic' $vB64 $sB64
