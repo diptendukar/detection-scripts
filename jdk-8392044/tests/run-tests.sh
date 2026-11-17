@@ -60,6 +60,9 @@ check() {
     for c in "$@"; do
         printf '%s\n' "$OUT" | grep -qF -- "$c" || ok=0
     done
+    # Fleet agents often run scripts with SIGPIPE ignored; stray write
+    # errors on stderr are a failure.
+    if printf '%s\n' "$OUT" | grep -qE 'Broken pipe|write error'; then ok=0; fi
     if [ "$ok" -eq 1 ]; then
         PASS=$((PASS + 1))
         echo "PASS  $name"
@@ -225,18 +228,22 @@ else
 fi
 
 # --- 5. Default full-host runs ------------------------------------------------------
+# Run with SIGPIPE ignored, as many fleet agents do. Pipes inside the script
+# must not then leak "write error: Broken pipe" to stderr.
+IGNPIPE=(bash -c 'trap "" PIPE; exec bash "$0" "$@"' "$S")
 
 echo
 echo "## Default full-host runs"
 for mode in user root; do
     if [ "$mode" = root ]; then
         sudo -n true 2>/dev/null || { echo "SKIP  root run"; continue; }
-        run sudo -n bash "$S"
+        run sudo -n "${IGNPIPE[@]}"
     else
-        run bash "$S"
+        run "${IGNPIPE[@]}"
     fi
     printf '%s\n' "$OUT" | sed 's/^/      | /'
-    if [ "$CODE" -le 2 ] && [ "$LAST" = "$(verdict "$CODE")" ]; then
+    if [ "$CODE" -le 2 ] && [ "$LAST" = "$(verdict "$CODE")" ] &&
+        ! printf '%s\n' "$OUT" | grep -qE 'Broken pipe|write error'; then
         PASS=$((PASS + 1)); echo "PASS  default $mode run consistent (exit $CODE, '$LAST')"
     else
         FAIL=$((FAIL + 1)); echo "FAIL  default $mode run inconsistent (exit $CODE, last line '$LAST')"

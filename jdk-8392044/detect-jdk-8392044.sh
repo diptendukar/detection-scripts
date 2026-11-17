@@ -204,11 +204,13 @@ filter_flags() {
 }
 
 # $1 output, $2 property name
-prop() { printf '%s\n' "$1" | sed -n "s/^ *$2 = //p" | head -1; }
+# Here-strings, not printf pipes: with SIGPIPE ignored (common under fleet
+# agents) an early-exiting reader makes printf report write errors.
+prop() { sed -n "s/^ *$2 = //p" <<<"$1" | head -1; }
 
 # $1 PrintFlagsFinal output, $2 flag name. Empty ccstr values print as "".
 flagval() {
-    printf '%s\n' "$1" | awk -v n="$2" '$2 == n { v = $4; if (v ~ /^\{/) v = ""; print v; exit }'
+    awk -v n="$2" '$2 == n { v = $4; if (v ~ /^\{/) v = ""; print v; exit }' <<<"$1"
 }
 
 # probe LABEL PREFIX JAVA FLAGS NOTE
@@ -232,7 +234,7 @@ probe() {
     vm=$(prop "$o1" java.vm.name)
     arch=$(prop "$o1" os.arch)
     if [ -z "$ver" ]; then
-        report unknown "$label $java$note: could not run it: $(printf '%s\n' "$o1" | head -1)"
+        report unknown "$label $java$note: could not run it: $(head -1 <<<"$o1")"
         return
     fi
     desc="$label $java ($ver, $vm)$note"
@@ -277,7 +279,7 @@ probe() {
         report ok "$desc: UseAVX=$useavx, AVX-512 stub not generated"; return
     fi
 
-    cpuline=$(printf '%s\n' "$o2" | grep -m1 'os,cpu.*CPU:' | sed 's/^.*CPU://')
+    cpuline=$(grep -m1 'os,cpu.*CPU:' <<<"$o2" | sed 's/^.*CPU://')
     if [ -n "$cpuline" ]; then
         vbmi=$(has_vbmi_bw "$cpuline")
     else
