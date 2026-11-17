@@ -145,7 +145,7 @@ gj() {
     fi
     if grep -qE 'SERVICE_DISABLED|has not been used in project|it is disabled|is not enabled' "$TMP/err"; then
         code=SERVICE_DISABLED
-    elif grep -q 'does not contain an App Engine application' "$TMP/err"; then
+    elif grep -qE 'does not contain an App Engine application|Apps instance \[[^]]*\] not found' "$TMP/err"; then
         code=NO_APP
     elif grep -qE "Required '[^']*' permission" "$TMP/err"; then
         code=PERMISSION_DENIED

@@ -250,6 +250,12 @@ check "demo-b -> unknown" 2 "api: run services list failed: PERMISSION_DENIED [?
     "api: compute instances list failed: PERMISSION_DENIED [?]" "note: 3 listing(s) denied."
 cp "$B/compute.instances.list.warn" "$WORK/warn.keep"
 echo 'WARNING: Some requests did not succeed.' > "$B/compute.instances.list.warn"
+cp "$B/app.versions.list.err" "$WORK/app.keep"
+echo "ERROR: (gcloud.app.versions.list) Apps instance [demo-b] not found: Resource 'applications/demo-b' was not found." \
+    > "$B/app.versions.list.err"
+run bash "$S" -p demo-b -s appengine
+check "App Engine app not found -> not in use" 0 "appengine demo-b: not in use (API off or no app)"
+cp "$WORK/app.keep" "$B/app.versions.list.err"
 run bash "$S" -p demo-b -s compute
 check "partial compute listing -> unknown" 2 "api: compute instances list failed: PARTIAL_FAILURE [?]"
 cp "$WORK/warn.keep" "$B/compute.instances.list.warn"
