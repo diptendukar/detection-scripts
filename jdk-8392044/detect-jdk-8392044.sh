@@ -8,7 +8,8 @@
 #
 # A JVM counts as impacted when all of these hold:
 #   1. HotSpot VM: OpenJDK and its builds (Temurin, Corretto, Zulu, Red Hat,
-#      Microsoft, Liberica, Oracle JDK, GraalVM JDK). OpenJ9 has no such stub.
+#      Microsoft, Liberica, Oracle JDK, GraalVM JDK). OpenJ9 and GCJ have no
+#      such stub; other VMs (e.g. Azul Prime) are reported as unknown.
 #   2. 64-bit x86 JVM (os.arch amd64 / x86_64) on an x86-64 host.
 #   3. Version 17.0.6 or later, and older than any fix listed in FIXED_IN.
 #   4. The JVM reports AVX-512 VBMI and AVX-512 BW and runs with UseAVX >= 3.
@@ -259,7 +260,7 @@ flagval() {
 probe() {
     local title=$1 prefix=$2 java=$3 flags=$4
     local h o1 o2 ver vm arch k useavx b64 comp tiered stop dis cpuline vbmi result
-    local s_arch s_vm s_ver v_ver s_avx v_avx s_b64 v_b64
+    local s_arch s_vm v_vm s_ver v_ver s_avx v_avx s_b64 v_b64
 
     h=$(printf '%s|%s|%s' "$prefix" "$java" "$flags" | cksum | tr -c '0-9\n' _)
     if [ -f "$TMP/$h.1" ]; then
@@ -281,8 +282,15 @@ probe() {
 
     s_arch=impacted
     case "$arch" in amd64|x86_64) ;; *) s_arch=ok ;; esac
-    s_vm=impacted
-    case "$vm" in *OpenJ9*|*J9*) s_vm=ok ;; esac
+    # Only HotSpot generates the stub. OpenJ9 and GCJ do not; Azul Prime
+    # (Zing) replaces C2 and is not verified; anything unrecognized is [?].
+    v_vm=$vm
+    case "$vm" in
+        *J9*|*libgcj*|*GNU*) s_vm=ok ;;
+        *Zing*|*Prime*) s_vm=unknown; v_vm="$vm (not HotSpot C2)" ;;
+        *HotSpot*|*"Server VM"*|*"Client VM"*) s_vm=impacted ;;
+        *) s_vm=unknown; v_vm="$vm (not recognized as HotSpot)" ;;
+    esac
     s_ver=impacted
     v_ver=$ver
     k=$(ver_key "$ver")
@@ -294,7 +302,7 @@ probe() {
 
     s_avx=n/a; v_avx=-
     s_b64=n/a; v_b64=-
-    if [ "$s_arch$s_vm$s_ver" = impactedimpactedimpacted ]; then
+    if [ "$s_arch" != ok ] && [ "$s_vm" != ok ] && [ "$s_ver" != ok ]; then
         if [ -f "$TMP/$h.2" ]; then
             o2=$(cat "$TMP/$h.2")
         else
@@ -358,7 +366,7 @@ probe() {
     say ""
     say "$title"
     line "arch" "$arch" "$s_arch"
-    line "vm" "$vm" "$s_vm"
+    line "vm" "$v_vm" "$s_vm"
     line "java version" "$v_ver" "$s_ver"
     line "avx-512" "$v_avx" "$s_avx"
     line "base64 intrinsic" "$v_b64" "$s_b64"

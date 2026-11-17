@@ -131,6 +131,10 @@ run env FAKE_VER=27.0.1 JDK8392044_FIXED_IN="17.0.19 25.0.3" "${F[@]}";   check 
 run env FAKE_FEATURES="avx512f, avx512bw, avx512_vbmi2" "${F[@]}"; check "vbmi2 without vbmi -> ok" 0 "avx-512: no vbmi/bw OK"
 run env FAKE_FEATURES="avx512f, avx512_vbmi" "${F[@]}";            check "vbmi without bw -> ok" 0 "avx-512: no vbmi/bw OK"
 run env FAKE_VM="Eclipse OpenJ9 VM" "${F[@]}";         check "OpenJ9 -> ok" 0 "vm: Eclipse OpenJ9 VM OK"
+run env FAKE_VM="GNU libgcj" "${F[@]}";                check "GCJ -> ok" 0 "vm: GNU libgcj OK"
+run env FAKE_VM="Java HotSpot(TM) 64-Bit Server VM" "${F[@]}"; check "Oracle HotSpot -> impacted" 1 "vm: Java HotSpot(TM) 64-Bit Server VM [!]"
+run env FAKE_VM="Zing 64-Bit Tiered VM" "${F[@]}";     check "Azul Prime -> unknown" 2 "vm: Zing 64-Bit Tiered VM (not HotSpot C2) [?]" "base64 intrinsic: on [!]"
+run env FAKE_VM="Mystery VM" FAKE_FEATURES="avx, avx2" "${F[@]}"; check "unrecognized VM, no AVX-512 -> ok" 0 "vm: Mystery VM (not recognized as HotSpot) [?]" "avx-512: UseAVX=2 OK"
 run env FAKE_ARCH=aarch64 "${F[@]}";                   check "aarch64 JVM -> ok" 0 "arch: aarch64 OK"
 run env FAKE_ARCH=i386 "${F[@]}";                      check "32-bit JVM -> ok" 0 "arch: i386 OK"
 HOST_VBMI=0

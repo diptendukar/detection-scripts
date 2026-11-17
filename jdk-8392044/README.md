@@ -8,12 +8,16 @@ the destination buffer.
 |---|---|
 | `detect-jdk-8392044.sh` | Linux, macOS; bash 3.2+ |
 | `Detect-Jdk8392044.ps1` | Windows; PowerShell 5.1 and 7 |
+| `detect-jdk-8392044-aws.sh` | AWS control plane (Lambda, ECS/Fargate, EC2, Beanstalk, EMR); aws CLI v2 + jq |
 
 ## What counts as impacted
 
 All five conditions must hold for at least one JVM on the host:
 
-1. HotSpot VM: any OpenJDK build, Oracle JDK, or GraalVM JDK. OpenJ9 is not affected.
+1. HotSpot VM: any OpenJDK build, Oracle JDK, or GraalVM JDK. Only HotSpot
+   generates the stub. OpenJ9 and GCJ are `OK`. Azul Prime (Zing), which
+   replaces C2 with its own JIT, and any VM name not recognized as HotSpot
+   are `[?]`, never `[!]`.
 2. x86-64 JVM on an x86-64 host.
 3. Version 17.0.6 or later, and not at or above a version listed in `FIXED_IN`.
 4. The JVM reports `avx512_vbmi` and `avx512bw`, and `UseAVX >= 3`.
@@ -102,14 +106,63 @@ public fix.
 Not parsed: `-XX:Flags=`, `-XX:VMOptionsFile=`, `@argfiles`. JVMs that use
 them are tagged in the output.
 
+## AWS managed runtimes
+
+`detect-jdk-8392044-aws.sh` applies the same five checks to workloads it can
+see through read-only AWS APIs. Output, markers and exit codes match the
+host scripts. Workloads that are OK are counted under `not shown:`; `-a`
+prints them too.
+
+```sh
+AWS_PROFILE=prod ./detect-jdk-8392044-aws.sh             # all enabled regions
+./detect-jdk-8392044-aws.sh -r us-east-1,eu-west-1 -s lambda,ecs -q
+```
+
+| Service | Read from | Not visible |
+|---|---|---|
+| Lambda | runtime, architecture, `JAVA_TOOL_OPTIONS`, `AWS_LAMBDA_JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, `_JAVA_OPTIONS`, SnapStart, provisioned concurrency, Managed Instances capacity provider | CPU (`[?]`, except Managed Instances), container image contents |
+| ECS / Fargate | running tasks: image tag, task definition and run-task override env, command, container instance type | Fargate CPU (`[?]`), image `ENV`, S3 environment files, secret values |
+| EC2 | instance family, Java packages in SSM inventory, JVM flags in user data | per-process flags, tarball and container JDKs |
+| Elastic Beanstalk | platform (Corretto/Java/Tomcat), environment properties, Tomcat JVM options, instance types | Procfile flags |
+| EMR | release label default JDK, `JAVA_HOME` overrides, flags in configurations, running instance types | per-daemon flags |
+
+Lambda's Java bootstrap (java17, java21 and java25, checked against
+`public.ecr.aws/lambda/java` on 2026-11-17) adds
+`-XX:+TieredCompilation -XX:TieredStopAtLevel=1`, which keeps the intrinsic
+unused. The bootstrap omits that default, and the function goes back to C2
+with the intrinsic in use, when:
+
+- `JAVA_TOOL_OPTIONS` contains `-XX:+TieredCompilation` or
+  `-XX:-TieredCompilation` (all versions);
+- `_JAVA_OPTIONS` overrides it (all versions);
+- java25: `AWS_LAMBDA_JAVA_TOOL_OPTIONS` is set, or the init type is
+  SnapStart, provisioned concurrency or Lambda Managed Instances.
+
+AVX-512 is decided by EC2 instance family: Intel Ice Lake and later and AMD
+Zen 4 and later have VBMI. Families not in the table are `[?]`. Flags found
+somewhere that may not reach the JVM (user data, EMR configurations,
+`JAVA_OPTS`) can only move a check to `[?]`, never to `OK`. Environment
+values and user data are reduced to the allowed JVM flags before anything is
+printed, so secrets in them never reach the output.
+
+For anything left at `[?]`, run the host script on the instance, e.g. through
+SSM Run Command or ECS Exec. Not covered: EKS (use the host script as a
+DaemonSet), App Runner, Glue, Managed Flink, EMR Serverless.
+
 ## Testing
 
 CI runs on every change under `jdk-8392044/`:
 
 - `jdk-8392044-windows.yml`: `tests/Run-Tests.ps1` under Windows PowerShell
   5.1 and PowerShell 7 on `windows-latest`.
-- `jdk-8392044-linux.yml`: shellcheck, then `tests/run-tests.sh` on
-  `ubuntu-latest` and `ubuntu-22.04`.
+- `jdk-8392044-linux.yml`: shellcheck, then `tests/run-tests.sh` and
+  `tests/run-aws-tests.sh` on `ubuntu-latest` and `ubuntu-22.04`.
+
+`run-aws-tests.sh` runs the AWS script against `tests/fake-aws`, which
+serves fixtures for each Lambda init mode and flag source, ECS on Fargate,
+EC2 and ARM64, EC2 inventory and gzip user data, Beanstalk and EMR. It also
+checks that no secret value appears in the output and that only read-only
+APIs are called. It needs no AWS account.
 
 Both harnesses use the same four layers:
 

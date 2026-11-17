@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# Fake aws CLI for run-aws-tests.sh. Serves canned JSON from $FAKE_AWS_DIR:
+#
+#   <region>/<service>.<operation>[_<key>].json   response on stdout, exit 0
+#   <region>/<service>.<operation>[_<key>].err    message on stderr, exit 254
+#   <service>.<operation>.json                     region-independent response
+#
+# <key> is the value of --cluster, --cluster-id, --instance-id,
+# --task-definition, --environment-name, --function-name or
+# --capacity-provider-name, with characters outside [A-Za-z0-9._-] replaced
+# by "_". Every call is appended to $FAKE_AWS_LOG.
+
+set -u
+dir=${FAKE_AWS_DIR:?}
+region="" svc="" op="" key=""
+all="$*"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --region) region=$2; shift ;;
+        --cluster|--cluster-id|--instance-id|--task-definition|--environment-name|--function-name|--capacity-provider-name)
+            key="${key}_$2"; shift ;;
+        --*)
+            case "${2-}" in --*|"") ;; *) shift ;; esac ;;
+        *)
+            if [ -z "$svc" ]; then svc=$1
+            elif [ -z "$op" ]; then op=$1
+            fi ;;
+    esac
+    shift
+done
+[ -n "${FAKE_AWS_LOG:-}" ] && printf '%s\n' "$all" >> "$FAKE_AWS_LOG"
+key=$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')
+for f in "$dir/$region/$svc.$op$key" "$dir/$svc.$op$key"; do
+    if [ -f "$f.json" ]; then cat "$f.json"; exit 0; fi
+    if [ -f "$f.err" ]; then cat "$f.err" >&2; exit 254; fi
+done
+echo "An error occurred (FakeNoFixture) when calling the $op operation: $region/$svc.$op$key" >&2
+exit 254

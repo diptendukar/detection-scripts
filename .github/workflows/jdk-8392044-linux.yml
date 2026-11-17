@@ -27,7 +27,10 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck -S warning jdk-8392044/detect-jdk-8392044.sh jdk-8392044/tests/run-tests.sh jdk-8392044/tests/fake-java
+        run: >-
+          shellcheck -S warning
+          jdk-8392044/detect-jdk-8392044.sh jdk-8392044/tests/run-tests.sh jdk-8392044/tests/fake-java
+          jdk-8392044/detect-jdk-8392044-aws.sh jdk-8392044/tests/run-aws-tests.sh jdk-8392044/tests/fake-aws
 
   test:
     name: bash on ${{ matrix.os }}
@@ -53,3 +56,7 @@ jobs:
 
       - name: Run tests
         run: ./jdk-8392044/tests/run-tests.sh --container-image "$CONTAINER_IMAGE"
+
+      # AWS detector against tests/fake-aws fixtures; no AWS credentials.
+      - name: Run AWS detector tests
+        run: ./jdk-8392044/tests/run-aws-tests.sh
