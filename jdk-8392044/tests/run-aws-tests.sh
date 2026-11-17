@@ -191,7 +191,11 @@ inst() { printf '{"InstanceId":"%s","InstanceType":"%s","Architecture":"%s","Tag
     inst i-ud c7i.xlarge x86_64 ud; echo ,
     inst i-noinv m6i.large x86_64 noinv; echo ,
     inst i-j8 m7a.large x86_64 j8; echo ,
-    inst i-unk zz9.large x86_64 unk
+    inst i-unk zz9.large x86_64 unk; echo ,
+    for n in 1 2 3 4; do
+        printf '{"InstanceId":"i-eks%s","InstanceType":"m6i.8xlarge","Architecture":"x86_64","Tags":[{"Key":"aws:eks:cluster-name","Value":"prod-k8s"}]},' "$n"
+    done
+    printf '{"InstanceId":"i-eks5","InstanceType":"m6i.2xlarge","Architecture":"x86_64","Tags":[{"Key":"kubernetes.io/cluster/prod-k8s","Value":"owned"}]}'
     echo ']}]}'
 } > "$E/ec2.describe-instances.json"
 apps() { printf '{"Entries":[{"Name":"bash","Version":"5.2"}%s]}' "${2:-}" > "$E/ssm.list-inventory-entries_$1.json"; }
@@ -204,7 +208,11 @@ echo 'An error occurred (InvalidInstanceId) when calling the ListInventoryEntrie
 UD=$(printf '#!/bin/bash\nexport JAVA_TOOL_OPTIONS="-XX:-UseBASE64Intrinsics -Dsecret=hunter2"\nexport API_KEY=hunter2\n' |
     gzip -c | base64 | tr -d '\n')
 echo '{"UserData":{"Value":"'"$UD"'"}}' > "$E/ec2.describe-instance-attribute_i-ud.json"
-for i in i-hot i-noinv i-j8 i-unk; do
+for n in 1 2 3 4 5; do
+    echo 'An error occurred (AccessDeniedException) when calling the ListInventoryEntries operation: no' \
+        > "$E/ssm.list-inventory-entries_i-eks$n.err"
+done
+for i in i-hot i-noinv i-j8 i-unk i-eks1 i-eks2 i-eks3 i-eks4 i-eks5; do
     echo '{"UserData":{}}' > "$E/ec2.describe-instance-attribute_$i.json"
 done
 echo '{"Reservations":[]}' > "$W/ec2.describe-instances.json"
@@ -319,7 +327,12 @@ check_block "ec2 gzip user data flag -> unknown" \
     "ec2 us-east-1 i-ud (ud) c7i.xlarge openjdk-17-jre-headless" \
     "java version: 17.0.13 [!]" \
     "off (-XX:-UseBASE64Intrinsics) only if user data reaches the JVM (default; process flags not visible) [?]"
-check_block "ec2 no SSM -> unknown" "ec2 us-east-1 i-noinv (noinv) m6i.large" "vm: no SSM inventory [?]"
+check_block "ec2 no SSM -> unknown" "ec2 us-east-1 i-noinv (noinv) m6i.large" "vm: no SSM inventory (InvalidInstanceId) [?]"
+check_block "ec2 EKS nodes grouped, inventory denied" "ec2 us-east-1 eks:prod-k8s m6i.* (5 instances)" \
+    "vm: SSM inventory denied (AccessDeniedException) [?]" "avx-512: vbmi+bw (m6i) [!]" \
+    "note: EKS node (cluster prod-k8s): JVMs run in pods" "note: instances: i-eks1 i-eks2 i-eks3 +2 more" \
+    "=> [?] unknown"
+assert "denied inventory counted" "$(printf '%s\n' "$OUT" | grep -c '^note: 1 listing(s) denied')" = 1
 check_block "ec2 java 8 -> OK" "ec2 us-east-1 i-j8 (j8) m7a.large java-1.8.0-amazon-corretto" \
     "java version: 1.8.0_432 (< 17.0.6) OK"
 check_block "ec2 unknown family" "ec2 us-east-1 i-unk (unk) zz9.large" \
@@ -395,6 +408,15 @@ run env JDK8392044_FIXED_IN="21.0.5" bash "$S" -a -s ecs -r us-east-1
 check_block "FIXED_IN covers 21.0.5 image tag" "ecs us-east-1 prod/hot app (1 task, EC2, m7i.large)" \
     "java version: 21.0.5 (fixed) (image tag) OK"
 
+for svc in ec2.describe-instances ecs.list-clusters emr.list-clusters elasticbeanstalk.describe-environments lambda.list-functions; do
+    mv "$E/$svc.json" "$E/$svc.keep"
+    echo '{"not json' > "$E/$svc.json"
+    sv=${svc%%.*}
+    [ "$sv" = elasticbeanstalk ] && sv=beanstalk
+    run bash "$S" -s "$sv" -r us-east-1
+    check "malformed ${svc%%.*} listing -> unknown, not OK" 2 "parse error [?]"
+    mv "$E/$svc.keep" "$E/$svc.json"
+done
 run bash "$S" -s nope
 check "bad service -> 3" 3
 run bash "$S" --bogus

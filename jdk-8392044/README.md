@@ -122,7 +122,7 @@ AWS_PROFILE=prod ./detect-jdk-8392044-aws.sh             # all enabled regions
 |---|---|---|
 | Lambda | runtime, architecture, `JAVA_TOOL_OPTIONS`, `AWS_LAMBDA_JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, `_JAVA_OPTIONS`, SnapStart, provisioned concurrency, Managed Instances capacity provider | CPU (`[?]`, except Managed Instances), container image contents |
 | ECS / Fargate | running tasks: image tag, task definition and run-task override env, command, container instance type | Fargate CPU (`[?]`), image `ENV`, S3 environment files, secret values |
-| EC2 | instance family, Java packages in SSM inventory, JVM flags in user data | per-process flags, tarball and container JDKs |
+| EC2 | instance family, Java packages in SSM inventory, JVM flags in user data, EKS cluster tags | per-process flags, tarball and container JDKs, pods on EKS nodes |
 | Elastic Beanstalk | platform (Corretto/Java/Tomcat), environment properties, Tomcat JVM options, instance types | Procfile flags |
 | EMR | release label default JDK, `JAVA_HOME` overrides, flags in configurations, running instance types | per-daemon flags |
 
@@ -183,6 +183,12 @@ environments encrypted with a customer-managed KMS key also need
 Denied listings show as `[?]` per service and region, followed by a count.
 If `ec2:DescribeRegions` and `account:ListRegions` are both denied, the
 script checks the 17 default-enabled regions and says so.
+
+EC2 instances with the same `[?]` result (an EKS node group, an auto scaling
+group) are grouped into one block with an instance count. EKS nodes are
+recognised by their cluster tags; their JVMs run in pods, so run the host
+script as root on the node (it reaches containers through `nsenter`) or as a
+privileged DaemonSet.
 
 For anything left at `[?]`, run the host script on the instance, e.g. through
 SSM Run Command or ECS Exec. Not covered: EKS (use the host script as a

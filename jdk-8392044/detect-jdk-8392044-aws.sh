@@ -570,7 +570,7 @@ scan_lambda() {
         return
     fi
     jq -r --arg wl "$WL" "$LAMBDA_JQ" <<<"$out" > "$TMP/lambda" 2>/dev/null || {
-        api_fail lambda "$r" "list-functions parse"; return; }
+        printf "parse error" > "$TMP/err_code"; api_fail lambda "$r" "list-functions"; return; }
     while IFS="$(printf '\t')" read -r fn ver rt arch pkg jto jdko jo aljto has_aljto wrap enverr nsig snap cap nlayer; do
         [ "$jto" = - ] && jto=""
         [ "$jdko" = - ] && jdko=""
@@ -780,19 +780,23 @@ scan_ecs() {
         api_fail ecs "$r" "list-clusters"
         return
     fi
-    for c in $(jq -r '.clusterArns[]?' <<<"$out"); do
+    jq -r '.clusterArns[]?' <<<"$out" > "$TMP/ecs_clusters" 2>"$TMP/err" || {
+        printf 'parse error' > "$TMP/err_code"; api_fail ecs "$r" "list-clusters"; return; }
+    for c in $(cat "$TMP/ecs_clusters"); do
         cname=${c##*/}
         if ! out=$(awsj "$r" ecs list-tasks --cluster "$c" --desired-status RUNNING); then
             api_fail ecs "$r/$cname" "list-tasks"
             continue
         fi
-        jq -r '.taskArns[]?' <<<"$out" > "$TMP/ecs_tasks"
+        jq -r '.taskArns[]?' <<<"$out" > "$TMP/ecs_tasks" 2>"$TMP/err" || {
+            printf 'parse error' > "$TMP/err_code"; api_fail ecs "$r/$cname" "list-tasks"; continue; }
         [ -s "$TMP/ecs_tasks" ] || continue
         if ! ecs_batches describe-tasks --tasks "$r" "$c" "$TMP/ecs_tasks" "$TMP/ecs_dt"; then
             api_fail ecs "$r/$cname" "describe-tasks"
             continue
         fi
-        jq -s '{tasks: map(.tasks[]?)}' "$TMP/ecs_dt.parts" > "$TMP/ecs_dt.json"
+        jq -s '{tasks: map(.tasks[]?)}' "$TMP/ecs_dt.parts" > "$TMP/ecs_dt.json" 2>"$TMP/err" || {
+            printf 'parse error' > "$TMP/err_code"; api_fail ecs "$r/$cname" "describe-tasks"; continue; }
 
         jq -r '.tasks[].containerInstanceArn // empty' "$TMP/ecs_dt.json" | sort -u > "$TMP/ecs_ci"
         echo '{}' > "$TMP/ecs_cim.json"
@@ -911,9 +915,18 @@ scan_ec2() {
         return
     fi
     jq -r '.Reservations[]?.Instances[]? | [.InstanceId, .InstanceType, (.Architecture // "x86_64"),
-           ((.Tags // []) | map(select(.Key == "Name")) | .[0].Value // "-")]
-           | map(if . == "" then "-" else . end) | @tsv' <<<"$out" > "$TMP/ec2"
-    while IFS="$(printf '\t')" read -r id itype iarch iname; do
+           ((.Tags // []) | map(select(.Key == "Name")) | .[0].Value // "-"),
+           ((.Tags // []) as $tg
+              | ([$tg[] | select(.Key == "aws:eks:cluster-name" or .Key == "eks:cluster-name"
+                                 or .Key == "eks:eks-cluster-name") | .Value]
+                 + [$tg[] | .Key | select(startswith("kubernetes.io/cluster/"))
+                    | ltrimstr("kubernetes.io/cluster/")])[0] // "-")]
+           | map(if . == "" then "-" else . end) | @tsv' <<<"$out" > "$TMP/ec2" 2>"$TMP/err" || {
+        printf 'parse error' > "$TMP/err_code"; api_fail ec2 "$r" "describe-instances"; return; }
+    : > "$TMP/ec2_groups"
+    local inv_denied=0 eks invst
+    while IFS="$(printf '\t')" read -r id itype iarch iname eks; do
+        [ "$eks" = - ] && eks=""
         local title="ec2 $r $id"
         [ "$iname" = - ] || title="$title ($iname)"
         title="$title $itype"
@@ -940,25 +953,23 @@ scan_ec2() {
 
         if inv=$(awsj "$r" ssm list-inventory-entries --instance-id "$id" --type-name AWS:Application); then
             java_packages <<<"$inv" > "$TMP/ec2_pk"
+            invst=nojava
         else
             inv=""
+            case "$(err_code)" in
+                *AccessDenied*|*Unauthorized*|*NotAuthorized*|*Forbidden*)
+                    invst="denied:$(err_code)"; inv_denied=1 ;;
+                *) invst="none:$(err_code)" ;;
+            esac
         fi
 
         if [ -z "$inv" ] || [ ! -s "$TMP/ec2_pk" ]; then
-            begin_block ec2 "$r" "$title"
-            chk arch "$iarch" impacted
-            if [ -z "$inv" ]; then
-                chk vm "no SSM inventory" unknown
-            else
-                chk vm "no Java package in SSM inventory" unknown
-            fi
-            chk "java version" "-" unknown
-            flags_check "" "$udf" "user data"
-            avx_check "$X_ST" "$X_VAL" "$F_AVX"
-            chk "base64 intrinsic" "$F_VAL (default; process flags not visible)" "$F_ST"
-            [ -n "$inv" ] && note "JDKs from tarballs or containers are not in inventory; run detect-jdk-8392044.sh on the host"
-            [ "$ud" = err ] && note "user data not read ($(err_code))"
-            end_block
+            # Identical [?] results are grouped: EKS node pools and auto
+            # scaling groups otherwise print one block per instance.
+            local uderr=""
+            [ "$ud" = err ] && uderr=$(err_code)
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${eks:--}" "${itype%%.*}" "$iarch" \
+                "${udf:--}" "$invst" "${uderr:--}" "$id" "$title" >> "$TMP/ec2_groups"
             continue
         fi
 
@@ -978,9 +989,59 @@ scan_ec2() {
             avx_check "$X_ST" "$X_VAL" "$F_AVX"
             chk "base64 intrinsic" "$F_VAL (default; process flags not visible)" "$F_ST"
             [ "$ud" = err ] && note "user data not read ($(err_code))"
+            [ -n "$eks" ] && note "$(eks_note "$eks")"
             end_block
         done < "$TMP/ec2_pk"
     done < "$TMP/ec2"
+    [ "$inv_denied" -eq 1 ] && N_DENIED=$((N_DENIED + 1))
+    ec2_group_blocks "$r"
+}
+
+eks_note() {
+    echo "EKS node (cluster $1): JVMs run in pods, which AWS APIs do not show; run detect-jdk-8392044.sh as root on the node or as a privileged DaemonSet"
+}
+
+# One block per group of instances with the same [?] result.
+ec2_group_blocks() {
+    local r=$1 key eks fam iarch udf invst uderr n ids title
+    cut -f1-6 "$TMP/ec2_groups" | sort | uniq -c | sed 's/^ *//' > "$TMP/ec2_gkeys"
+    while IFS= read -r key; do
+        n=${key%% *}
+        key=${key#* }
+        IFS="$(printf '\t')" read -r eks fam iarch udf invst uderr <<EOF2
+$key
+EOF2
+        [ "$udf" = - ] && udf=""
+        ids=$(awk -F '\t' -v k="$key" '{ kk = $1; for (i = 2; i <= 6; i++) kk = kk "\t" $i } kk == k { print $7 }' \
+            "$TMP/ec2_groups")
+        if [ "$n" -eq 1 ]; then
+            title=$(awk -F '\t' -v k="$key" '{ kk = $1; for (i = 2; i <= 6; i++) kk = kk "\t" $i } kk == k { print $8; exit }' \
+                "$TMP/ec2_groups")
+        else
+            title="ec2 $r"
+            [ "$eks" = - ] || title="$title eks:$eks"
+            title="$title $fam.* ($n instances)"
+        fi
+        begin_block ec2 "$r" "$title"
+        chk arch "$iarch" impacted
+        case "$invst" in
+            denied:*) chk vm "SSM inventory denied (${invst#denied:})" unknown ;;
+            none:*) chk vm "no SSM inventory (${invst#none:})" unknown ;;
+            *) chk vm "no Java package in SSM inventory" unknown ;;
+        esac
+        chk "java version" "-" unknown
+        types_check "$fam.x"
+        flags_check "" "$udf" "user data"
+        avx_check "$X_ST" "$X_VAL" "$F_AVX"
+        chk "base64 intrinsic" "$F_VAL (default; process flags not visible)" "$F_ST"
+        [ "$invst" = nojava ] && note "JDKs from tarballs or containers are not in inventory; run detect-jdk-8392044.sh on the host"
+        [ "$uderr" = - ] || note "user data not read ($uderr)"
+        [ "$eks" = - ] || note "$(eks_note "$eks")"
+        if [ "$n" -gt 1 ]; then
+            note "instances: $(printf '%s\n' "$ids" | head -3 | tr '\n' ' ' | sed 's/ $//')$( [ "$n" -gt 3 ] && echo " +$((n - 3)) more")"
+        fi
+        end_block
+    done < "$TMP/ec2_gkeys"
 }
 
 # -------------------------------------------------------------- beanstalk ---
@@ -1004,7 +1065,8 @@ scan_beanstalk() {
     fi
     jq -r '.Environments[]? | select(.Status != "Terminated" and .Status != "Terminating")
            | [.ApplicationName, .EnvironmentName, (.SolutionStackName // .PlatformArn // "-")] | @tsv' \
-        <<<"$out" > "$TMP/eb"
+        <<<"$out" > "$TMP/eb" 2>"$TMP/err" || {
+        printf 'parse error' > "$TMP/err_code"; api_fail beanstalk "$r" "describe-environments"; return; }
     while IFS="$(printf '\t')" read -r app env plat; do
         major=$(printf '%s' "$plat" | sed -nE 's/.*(Corretto|Java)[ _-]?([0-9]+).*/\2/p')
         case "$plat" in
@@ -1056,7 +1118,8 @@ scan_emr() {
         api_fail emr "$r" "list-clusters"
         return
     fi
-    jq -r '.Clusters[]? | [.Id, (.Name // "-")] | @tsv' <<<"$out" > "$TMP/emr"
+    jq -r '.Clusters[]? | [.Id, (.Name // "-")] | @tsv' <<<"$out" > "$TMP/emr" 2>"$TMP/err" || {
+        printf 'parse error' > "$TMP/err_code"; api_fail emr "$r" "list-clusters"; return; }
     while IFS="$(printf '\t')" read -r id cname; do
         begin_block emr "$r" "emr $r $id ($cname)"
         if ! cl=$(awsj "$r" emr describe-cluster --cluster-id "$id"); then
