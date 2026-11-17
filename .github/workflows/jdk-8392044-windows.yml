@@ -3,11 +3,11 @@ name: jdk-8392044 PowerShell detector (Windows)
 on:
   push:
     paths:
-      - "jdk-8392044/**"
+      - "CVE-2026-114938/windows/**"
       - ".github/workflows/jdk-8392044-windows.yml"
   pull_request:
     paths:
-      - "jdk-8392044/**"
+      - "CVE-2026-114938/windows/**"
       - ".github/workflows/jdk-8392044-windows.yml"
   workflow_dispatch:
 
@@ -39,9 +39,9 @@ jobs:
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path "$PWD\fake" | Out-Null
-          Add-Type -Path "$PWD\jdk-8392044\tests\FakeJava.cs" -OutputAssembly "$PWD\fake\java.exe" -OutputType ConsoleApplication
+          Add-Type -Path "$PWD\CVE-2026-114938\windows\tests\FakeJava.cs" -OutputAssembly "$PWD\fake\java.exe" -OutputType ConsoleApplication
           & "$PWD\fake\java.exe" -XshowSettings:properties -version
 
       - name: Run tests
         shell: pwsh
-        run: ./jdk-8392044/tests/Run-Tests.ps1 -Shell '${{ matrix.shell }}' -FakeJava "$PWD\fake\java.exe"
+        run: ./CVE-2026-114938/windows/tests/Run-Tests.ps1 -Shell '${{ matrix.shell }}' -FakeJava "$PWD\fake\java.exe"
