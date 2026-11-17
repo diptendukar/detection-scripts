@@ -998,7 +998,7 @@ scan_ec2() {
 }
 
 eks_note() {
-    echo "EKS node (cluster $1): JVMs run in pods, which AWS APIs do not show; run detect-jdk-8392044.sh as root on the node or as a privileged DaemonSet"
+    echo "EKS node (cluster $1): JVMs run in pods, which AWS APIs do not show; run detect-jdk-8392044.sh as root on the node or cluster-wide with k8s-jdk-8392044.yaml"
 }
 
 # One block per group of instances with the same [?] result.

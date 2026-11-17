@@ -709,7 +709,7 @@ COMPUTE_JQ="$JQ_WL"'
 
 cluster_note() {
     case "$1" in
-        gke:*) echo "GKE node (cluster ${1#gke:}): JVMs run in pods, which GCP APIs do not show; run detect-jdk-8392044.sh as root on the node or as a privileged DaemonSet" ;;
+        gke:*) echo "GKE node (cluster ${1#gke:}): JVMs run in pods, which GCP APIs do not show; run detect-jdk-8392044.sh as root on the node or cluster-wide with k8s-jdk-8392044.yaml" ;;
         dataproc:*) echo "Dataproc node (cluster ${1#dataproc:}): Spark and Hadoop JVMs; run detect-jdk-8392044.sh on the node" ;;
     esac
 }
