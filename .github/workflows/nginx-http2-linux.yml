@@ -1,0 +1,72 @@
+name: nginx (CVE-2026-123007, CVE-2026-123633, CVE-2026-123634) bash detector
+
+on:
+  push:
+    paths:
+      - "CVE-2026-123633.CVE-2026-123007/linux/**"
+      - ".github/workflows/nginx-http2-linux.yml"
+  pull_request:
+    paths:
+      - "CVE-2026-123633.CVE-2026-123007/linux/**"
+      - ".github/workflows/nginx-http2-linux.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DIR: CVE-2026-123633.CVE-2026-123007/linux
+  # Pinned by digest. nginx:1.30.6 / 1.30.6-alpine are the last releases
+  # before the fix; the distro images get nginx from their own repositories.
+  IMG_ORG: nginx@sha256:42c68eab6f7e22611786a9fe1d1c019e275c50185bd54b8f75dc2b9184322703
+  IMG_ALPINE: nginx@sha256:901e593c95dc85f5a729f5765516321366ef4ac401821431d408897e95287d0a
+  IMG_OPENRESTY: openresty/openresty@sha256:8dddb7eef46975651752294138269b2c450ce89d1810113997df254725f5fa9a
+  IMG_DEBIAN: debian@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
+  IMG_UBUNTU: ubuntu@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+  IMG_ALMA: almalinux@sha256:02df05719ef287ebd0df0a1eedb9172a00bd70703aed7b25660e426b8e0d6047
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: >-
+          shellcheck -S warning
+          "$DIR/detect-nginx-http2.sh" "$DIR/ssh-nginx-http2.sh"
+          "$DIR/tests/run-tests.sh" "$DIR/tests/fake-nginx"
+
+  test-linux:
+    name: bash on ${{ matrix.os }} (with Docker)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pull container images
+        run: |
+          for i in "$IMG_ORG" "$IMG_ALPINE" "$IMG_OPENRESTY" "$IMG_DEBIAN" "$IMG_UBUNTU" "$IMG_ALMA"; do
+            docker pull -q "$i"
+          done
+      - name: Run tests
+        run: ./"$DIR"/tests/run-tests.sh
+
+  # macOS ships bash 3.2; the decision-logic tests run there without Docker.
+  test-macos:
+    name: bash 3.2 on macos-latest
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run tests
+        run: /bin/bash "$DIR/tests/run-tests.sh" --no-docker
